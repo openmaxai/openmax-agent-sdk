@@ -103,6 +103,15 @@ const DEFAULT_METRICS_INTERVAL_MS = 60 * 1000;
 const FRAME_METRIC_INTERVAL_MS = 5 * 60 * 1000;
 const MEMBER_OWNER_TTL_MS = 300_000;
 
+// The live cws-comm server sends id-type fields (message id, conversation id,
+// thread/parent ids) as JSON numbers, while the canonical InboundMessage /
+// wake-request contract declares them as strings. Canonicalize numeric ids to
+// strings at the ingestion boundary so every adapter receives contract-shaped
+// ids without re-implementing the coercion. (Real drift found on live
+// openmax.com: a numeric messageId was rejected by a schema-exact /wake gate;
+// our fixtures were all-string so the contract tests never exercised it.)
+const idStr = (v) => (typeof v === 'number' ? String(v) : v);
+
 export class CwsAgentBridge {
   constructor({
     http,
@@ -495,19 +504,19 @@ export class CwsAgentBridge {
       orgId: orgConfig.org_id,
       orgSlug: orgConfig.slug,
       orgName: orgConfig.org_name,
-      conversation: conv || { id: msg.conversation_id },
-      conversationId: msg.conversation_id,
+      conversation: conv || { id: idStr(msg.conversation_id) },
+      conversationId: idStr(msg.conversation_id),
       conversationType: convType,
-      messageId: msg.id,
+      messageId: idStr(msg.id),
       seq: msg.seq,
-      senderId: msg.sender_id,
+      senderId: idStr(msg.sender_id),
       senderType: String(msg.sender_type || msg.message?.sender_type || ''),
       senderDisplayName: msg.sender_display_name || msg.sender?.display_name || '',
       type: msgType,
       text,
       attachments,
-      parentMessageId: msg.parent_id || msg.message?.parent_id || msg.parent_message_id || null,
-      threadId: msg.thread_id || null,
+      parentMessageId: idStr(msg.parent_id || msg.message?.parent_id || msg.parent_message_id) || null,
+      threadId: idStr(msg.thread_id) || null,
       endpoint,
       priority: systemEventPriority(msg),
       via: notification._via || 'ws',
@@ -558,7 +567,7 @@ export class CwsAgentBridge {
         this.#warn(`[${orgConfig.slug}] system ${payload.event}: missing conversation_id, skip`);
         return;
       }
-      const messageId = data.message_id || data.id || data.msg_id || '';
+      const messageId = idStr(data.message_id || data.id || data.msg_id) || '';
       const dedupKey = `sys:${kind}:${conversationId}:${messageId || payload.event}`;
       // ATOMIC RESERVE (synchronous check-and-claim, P1-A). Taken BEFORE the
       // first await (the conversation fetch) so two concurrent frames for the
