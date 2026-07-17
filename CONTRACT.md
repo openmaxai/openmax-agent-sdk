@@ -74,6 +74,16 @@ Python SDK can independently state which contract version they implement.
   keeps them as free strings (documenting the known values dm/group/thread)
   rather than a closed enum, because the value is whatever cws-core sets on the
   conversation/message.
+- **`senderId` is OPTIONAL on the normalized `InboundMessage`.** When message-detail
+  cannot resolve the sender (neither the notification frame, the fetched detail, nor
+  the nested `message` carries `sender_id`), the SDK STILL delivers the message and
+  `#buildInbound` emits it with no `senderId`. `inbound-message.schema.json` reflects
+  this reality — `senderId` is defined but NOT in `required` — so a schema-conformant
+  Python/Hermes impl accepts the Node SDK's real output. The
+  `05-dm-sender-unresolved` inbound fixture pins the sender-less delivery and asserts
+  it validates. This is a schema-accuracy fix only: delivery/rejection behavior is
+  unchanged — whether to instead reject sender-less messages is a separate owner
+  decision.
 - **`wake-request` is adapter-built, not SDK-built.** The SDK never constructs the
   `/wake` body (Cat.B delivery lives behind `InboundDelivery.deliver` in the
   adapter). The schema pins the contract both sides must agree on; it is derived

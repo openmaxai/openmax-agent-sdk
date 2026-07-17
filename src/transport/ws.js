@@ -301,7 +301,8 @@ export function createDeduper(optsOrLegacyTtl = {}, legacyOpts) {
   // Backward compat: old call-sites passed (ttlMs, opts); new ones pass (opts).
   const opts = typeof optsOrLegacyTtl === 'object' ? optsOrLegacyTtl : (legacyOpts || {});
   const { persistPath = null, maxEntries = 5000 } = opts;
-  const seen = new Map();   // id -> first-seen ts(ms); Map insertion order = age
+  const seen = new Map();      // id -> first-seen ts(ms); Map insertion order = age
+  const reserved = new Set();  // id -> in-flight claim (reserved, not yet committed)
 
   function evictOverflow() {
     while (seen.size > maxEntries) {
@@ -340,36 +341,63 @@ export function createDeduper(optsOrLegacyTtl = {}, legacyOpts) {
     flushTimer.unref?.();
   }
 
-  // COMMIT — record `id` as seen. Idempotent; returns true if it was already
-  // present (i.e. a duplicate), false if this call is what recorded it.
+  // RESERVE — SYNCHRONOUS check-and-claim (the atomic exclusive-claim primitive,
+  // P1-A). Returns true if `id` is NEWLY claimed (caller owns it and must later
+  // commit() or release() it); false if `id` is already committed (seen) OR
+  // already reserved in-flight by a concurrent caller. Because JS runs this to
+  // completion before any await, two concurrent handlers for the SAME id can
+  // never both see true — exactly one wins the claim, the loser is a no-op dup.
+  // An empty id is untrackable → returns true (caller proceeds; no dedupe).
+  function reserve(id) {
+    if (!id) return true;
+    if (seen.has(id)) return false;      // already finalized (delivered)
+    if (reserved.has(id)) return false;  // already in-flight (concurrent dup)
+    reserved.add(id);
+    return true;
+  }
+  // COMMIT — finalize `id` (reserved → seen). Idempotent; returns true if it was
+  // already present in `seen` (i.e. a duplicate), false if this call is what
+  // recorded it. Also usable stand-alone as a legacy check-and-record.
   function commit(id) {
     if (!id) return false;
+    reserved.delete(id);
     if (seen.has(id)) return true;
     seen.set(id, Date.now());
     evictOverflow();
     dirty = true; scheduleFlush();
     return false;
   }
-  // PEEK — is `id` already recorded? Does NOT record (no side effects). Lets a
-  // caller RESERVE-then-COMMIT: inspect first, and only commit once the work the
-  // id represents has genuinely succeeded (see orchestrator P1-1/P1-3).
+  // RELEASE — free an in-flight reservation WITHOUT committing (P1-A). Called
+  // when the work the reservation represents failed, so a later /sync replay can
+  // re-reserve and retry. Does not touch `seen`.
+  function release(id) {
+    if (!id) return;
+    reserved.delete(id);
+  }
+  // PEEK — is `id` already committed (seen)? Does NOT record (no side effects).
+  // Retained for callers that only need inspection; new delivery paths use the
+  // atomic reserve()/commit()/release() trio instead.
   function has(id) {
     if (!id) return false;
     return seen.has(id);
   }
-  // ROLLBACK — undo a commit (best-effort). Used when a committed id must be
-  // released because the downstream work failed after all.
+  // ROLLBACK — undo a commit AND drop any reservation (best-effort). Used when a
+  // committed id must be un-recorded because downstream work failed after all.
   function rollback(id) {
     if (!id) return;
+    reserved.delete(id);
     if (seen.delete(id)) { dirty = true; scheduleFlush(); }
   }
 
   // The deduper is callable for backward-compat (legacy check-and-record: returns
-  // true if duplicate, else records + returns false) AND carries has/commit/
-  // rollback so reserve/commit callers can separate inspection from recording.
+  // true if duplicate, else records + returns false) AND carries the atomic
+  // reserve/commit/release/has/rollback surface so reserve/commit callers can
+  // separate an exclusive claim from finalization.
   const dedupe = (id) => commit(id);
-  dedupe.has = has;
+  dedupe.reserve = reserve;
   dedupe.commit = commit;
+  dedupe.release = release;
+  dedupe.has = has;
   dedupe.rollback = rollback;
   return dedupe;
 }

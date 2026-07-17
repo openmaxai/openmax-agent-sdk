@@ -74,6 +74,24 @@ function appendRpcLine(line) {
   } catch { /* best-effort: don't crash RPCs on disk errors */ }
 }
 
+// ── redirect handling (credential-leak guard, P1-C) ──────────────────────────
+// A 3xx status that carries a Location header. Native fetch auto-follows these
+// and RE-SENDS the request headers (incl. our CF-Access + Bearer) to the target
+// — which, for a cross-origin redirect, leaks CWS credentials to a third party.
+// We therefore use `redirect: 'manual'` and follow ONLY same-origin/trusted
+// hops ourselves (see _fetchNoAutoFollow).
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+function isRedirectStatus(s) { return REDIRECT_STATUSES.has(s); }
+function readLocation(res) {
+  const h = res?.headers;
+  if (!h || typeof h.get !== 'function') return null;
+  return h.get('location') ?? h.get('Location') ?? null;
+}
+function safeOrigin(u) {
+  try { return new URL(u).origin; } catch { return String(u); }
+}
+const MAX_REDIRECT_HOPS = 5;
+
 // ── URL building ─────────────────────────────────────────────────────────────
 function buildUrl(baseUrl, path, query) {
   const base = (baseUrl || '').replace(/\/$/, '');
@@ -240,6 +258,59 @@ export class CwsHttpClient {
     appendRpcLine(line);
   }
 
+  /**
+   * Fetch with NO automatic redirect following (P1-C). Native fetch, left to its
+   * default `redirect: 'follow'`, re-sends the request headers — including our
+   * CF-Access service token and Bearer/JWT — to the redirect target. For a
+   * cross-origin redirect that silently leaks CWS credentials to a third party.
+   *
+   * We force `redirect: 'manual'` and handle 3xx ourselves:
+   *   - `credentialed` request (CWS creds are attached): a redirect to an
+   *     UNTRUSTED origin FAILS CLOSED (throws — the creds never reach it); a
+   *     redirect to a TRUSTED/same origin is followed, re-applying the trusted-
+   *     origin gate on every hop.
+   *   - non-credentialed request (e.g. a presigned S3/CDN URL): redirects are
+   *     followed transparently (there are no CWS creds to leak).
+   * A 3xx without a readable Location is handed back to the caller unchanged.
+   *
+   * @param {string} url
+   * @param {object} init          fetch init (method/headers/body)
+   * @param {boolean} credentialed whether CWS creds are attached to `init.headers`
+   */
+  async _fetchNoAutoFollow(url, init, credentialed) {
+    let curUrl = String(url);
+    let curInit = { ...init, redirect: 'manual' };
+    for (let hop = 0; ; hop++) {
+      const res = await this._fetch(curUrl, curInit);
+      if (!isRedirectStatus(res.status)) return res;
+      const loc = readLocation(res);
+      if (!loc) return res;   // 3xx with no Location → hand the response back as-is
+      if (hop >= MAX_REDIRECT_HOPS) {
+        throw new Error(`too many redirects (>${MAX_REDIRECT_HOPS}) starting from ${url}`);
+      }
+      let nextUrl;
+      try { nextUrl = new URL(loc, curUrl).toString(); }
+      catch { throw new Error(`invalid redirect Location "${loc}" from ${curUrl}`); }
+
+      // Fail-closed: a credentialed request must NEVER follow a redirect to an
+      // untrusted origin carrying CWS creds. Re-applies the trusted-origin gate
+      // to the NEXT hop's target (P1-C).
+      if (credentialed && !this._isTrustedTarget(nextUrl)) {
+        const err = new Error(
+          `refusing to follow cross-origin redirect to ${safeOrigin(nextUrl)} that would carry CWS credentials (from ${safeOrigin(curUrl)})`,
+        );
+        err.status = res.status;
+        err.code = 'CROSS_ORIGIN_REDIRECT';
+        throw err;
+      }
+
+      curUrl = nextUrl;
+      // 303 (and by common practice 302/301 for non-idempotent methods) → GET,
+      // and never carry a body across the redirect.
+      if (res.status === 303) curInit = { ...curInit, method: 'GET', body: undefined };
+    }
+  }
+
   // ── generic request impl (baseUrl + headers injected by caller) ─────────────
   async _doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId } = {}) {
     const url = buildUrl(baseUrl, path, query);
@@ -262,11 +333,13 @@ export class CwsHttpClient {
 
       this._logRpcRequest(method, url, body, orgId);
 
-      const res = await this._fetch(url, {
+      // redirect: 'manual' + fail-closed cross-origin guard (P1-C). `trusted`
+      // marks whether CWS creds were attached above.
+      const res = await this._fetchNoAutoFollow(url, {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
-      });
+      }, trusted);
 
       const text = await res.text();
       let data;
@@ -427,12 +500,15 @@ export class CwsHttpClient {
    * `uploads/prepare` response headers) are sent.
    */
   async putBytes(url, buf, contentType, extraHeaders = {}) {
+    const trusted = this._isTrustedTarget(url);
     const headers = {
       'Content-Type': contentType || 'application/octet-stream',
-      ...(this._isTrustedTarget(url) ? cfAccessHeaders(this._cfAccess) : {}),
+      ...(trusted ? cfAccessHeaders(this._cfAccess) : {}),
       ...extraHeaders,
     };
-    const res = await this._fetch(url, { method: 'PUT', headers, body: buf });
+    // No auto-follow: a credentialed (trusted) upload that 3xx's cross-origin
+    // fails closed rather than re-sending CF-Access to the target (P1-C).
+    const res = await this._fetchNoAutoFollow(url, { method: 'PUT', headers, body: buf }, trusted);
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       const err = new Error(`PUT ${res.status}: ${text || res.statusText}`);
@@ -449,8 +525,11 @@ export class CwsHttpClient {
    * (P1-2).
    */
   async getBytes(url) {
-    const headers = this._isTrustedTarget(url) ? cfAccessHeaders(this._cfAccess) : {};
-    const res = await this._fetch(url, { headers });
+    const trusted = this._isTrustedTarget(url);
+    const headers = trusted ? cfAccessHeaders(this._cfAccess) : {};
+    // No auto-follow: a credentialed (trusted) download that 3xx's cross-origin
+    // fails closed rather than re-sending CF-Access to the target (P1-C).
+    const res = await this._fetchNoAutoFollow(url, { headers }, trusted);
     if (!res.ok) throw new Error(`GET ${res.status}: ${res.statusText}`);
     return Buffer.from(await res.arrayBuffer());
   }

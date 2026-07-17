@@ -150,6 +150,23 @@ export class CwsAgentBridge {
     this._dedupe = this.callbacks.dedupe || createDeduper({
       maxEntries: reporters.dedupMaxEntries ?? DEFAULT_DEDUP_MAX_ENTRIES,
     });
+    // Does the deduper support the ATOMIC reserve()/commit()/release() claim
+    // (P1-A)? The default createDeduper() does. A legacy plain-function
+    // `callbacks.dedupe` (callable, no reserve) does NOT — it can only
+    // check-and-record on peek, which is NOT atomic under concurrency and cannot
+    // release a claim after a failed deliver. We accept it best-effort and warn
+    // loudly so the degraded exactly-once semantics are documented, not silent.
+    this._dedupeAtomic = typeof this._dedupe.reserve === 'function'
+      && typeof this._dedupe.commit === 'function';
+    if (this.callbacks.dedupe && !this._dedupeAtomic) {
+      this.#warn('[dedupe] legacy plain-function callbacks.dedupe supplied: no '
+        + 'atomic reserve()/commit() — falling back to best-effort '
+        + 'check-and-record. DEGRADED semantics: exactly-once is not guaranteed '
+        + 'under concurrent same-id delivery, and a failed/thrown deliver() '
+        + 'cannot release the claim, so a subsequent /sync replay may be '
+        + 'suppressed. Supply a createDeduper()-shaped deduper for atomic '
+        + 'exactly-once.');
+    }
 
     // slug → per-org runtime record ({ orgConfig, sessionRef, ledger, sync, ws,
     //   onFrame, handleIncomingMessage })
@@ -192,26 +209,39 @@ export class CwsAgentBridge {
   #log(...a) { this.logger.info?.(...a); }
   #warn(...a) { this.logger.warn?.(...a); }
 
-  // ── dedupe RESERVE / COMMIT helpers ──────────────────────────────────────────
+  // ── dedupe RESERVE / COMMIT / RELEASE helpers (atomic exclusive claim, P1-A) ──
   // The message pipeline (P1-1) and the recall/edit system path (P1-3) must
-  // RESERVE a dedupe id (inspect only) and COMMIT it ONLY once the work the id
-  // represents has genuinely succeeded (delivered ok, or terminally consumed by a
-  // policy reject / callback success). Committing before the work succeeds would
-  // block redelivery of a message that never entered the runtime context.
+  // atomically RESERVE a dedupe id (a synchronous check-and-claim) BEFORE the
+  // await deliver(), then COMMIT it ONLY once the work the id represents has
+  // genuinely succeeded (delivered ok, or terminally consumed by a policy reject /
+  // callback success), and RELEASE it if the work failed so a later /sync replay
+  // can retry. Reserving before the await is what makes delivery exactly-once
+  // under concurrency: two concurrent handlers for the same id — the second
+  // reserve() returns false and does NOT deliver again.
   //
-  // The default deduper (createDeduper) exposes has()/commit(); a legacy
-  // adapter-supplied plain-function `callbacks.dedupe` has neither, so we degrade
-  // to check-and-record (peek records eagerly, commit is then a no-op) — the old
-  // behavior, only for that legacy shape.
-  #dedupeHas(id) {
-    if (!id) return false;
-    if (typeof this._dedupe.has === 'function') return this._dedupe.has(id);
-    return this._dedupe(id);   // legacy callable: check-and-record
+  // The default deduper (createDeduper) exposes atomic reserve/commit/release. A
+  // legacy adapter-supplied plain-function `callbacks.dedupe` has none, so we
+  // degrade to best-effort check-and-record (reserve = the callable's own
+  // check-and-record, commit/release are no-ops) — documented at construction.
+
+  // RESERVE — returns true if the id was newly claimed (caller owns it and must
+  // commit/release), false if it's a committed or in-flight duplicate.
+  #dedupeReserve(id) {
+    if (!id) return true;
+    if (this._dedupeAtomic) return this._dedupe.reserve(id);
+    // Legacy callable: check-and-record returns true if ALREADY seen (duplicate),
+    // so a `false` result means we just recorded it → newly claimed.
+    return this._dedupe(id) === false;
   }
   #dedupeCommit(id) {
     if (!id) return;
-    if (typeof this._dedupe.commit === 'function') this._dedupe.commit(id);
-    // legacy callable already recorded during #dedupeHas — nothing to do.
+    if (this._dedupeAtomic) this._dedupe.commit(id);
+    // legacy callable already recorded during #dedupeReserve — nothing to do.
+  }
+  #dedupeRelease(id) {
+    if (!id) return;
+    if (this._dedupeAtomic) this._dedupe.release?.(id);
+    // legacy callable cannot un-record — degraded (documented at construction).
   }
 
   // ── protocol read helpers (thin http wrappers, cached; port of comm-bridge) ──
@@ -296,121 +326,143 @@ export class CwsAgentBridge {
       this.#log(`[ws] [${orgConfig.slug}] message frame: id=${notifId || '<missing>'} conv=${notifConv || '<missing>'} sender=${notifSender || '?'}`);
       if (!notifId || !notifConv) return;
 
-      // RESERVE vs COMMIT (P1-1). Dedupe + inbox-ledger + cursor/ack advancement
-      // are the "consumed" markers. They must NOT be committed until the message
+      // RESERVE vs COMMIT (P1-1/P1-A). Dedupe + inbox-ledger + cursor/ack
+      // advancement are the "consumed" markers. The message-id claim is now a
+      // genuinely ATOMIC exclusive reservation taken SYNCHRONOUSLY before the
+      // first await — so two concurrent handlers for the same id can never both
+      // deliver (exactly-once). The claim is COMMITTED only when the message
       // genuinely enters the runtime context (deliver → {ok:true}) OR is
       // terminally rejected by access policy (a policy reject IS consumed). On a
-      // {ok:false} or a thrown deliver(), NONE of them advance and the handler
-      // THROWS so the live path drops it (frame-dispatch guard catches) and the
-      // /sync sweep does not advance its cursor past it → redelivered later.
+      // {ok:false} or a thrown deliver(), the reservation is RELEASED and the
+      // handler THROWS so the live path drops it (frame-dispatch guard catches)
+      // and the /sync sweep does not advance its cursor past it → redelivered.
 
-      // (1) message-id dedupe — RESERVE (peek only; committed post-deliver).
-      if (this.#dedupeHas(notifId)) {
-        this.#log(`[ws] [${orgConfig.slug}] msg=${notifId} duplicate, skipping`);
+      // (1) message-id dedupe — ATOMIC RESERVE (synchronous check-and-claim).
+      // false ⇒ already committed OR an in-flight concurrent duplicate → do NOT
+      // deliver again.
+      if (!this.#dedupeReserve(notifId)) {
+        this.#log(`[ws] [${orgConfig.slug}] msg=${notifId} duplicate (committed or in-flight), skipping`);
         return;
       }
 
-      // (2) fetch full message detail and merge over the notification frame.
-      const detail = await this.#fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id);
-      const msg = { ...notification, ...(detail || {}) };
-
-      // (3) inbox-seq ledger — RESERVE (peek only; committed via record() post-
-      // deliver). Source priority: sync-frame notification.seq, else detail.inbox_seq.
-      const inboxSeq = (notification._via === 'sync' && typeof notification.seq === 'number')
-        ? notification.seq
-        : (detail?.inbox_seq ?? detail?.message?.inbox_seq ?? null);
-      if (ledger && inboxSeq != null && ledger.has?.(inboxSeq)) {
-        this.#log(`[ws] [${orgConfig.slug}] msg=${notifId} inbox_seq=${inboxSeq} already recorded, skipping`);
-        return;
-      }
-
-      // Commit the "consumed" markers. Called on terminal outcomes only:
-      // deliver {ok:true}, or a terminal policy reject.
-      const commitConsumed = () => {
-        this.#dedupeCommit(notifId);
-        if (ledger && inboxSeq != null) ledger.record(inboxSeq);
-      };
-
-      // (4) hoist scalar fields the sync-catch-up envelope nests under `message`
-      // so downstream consumers see a uniform shape regardless of arrival path.
-      if (!msg.sender_id && msg.message?.sender_id) msg.sender_id = msg.message.sender_id;
-      if (msg.seq == null && msg.message?.seq != null) msg.seq = msg.message.seq;
-      if (!msg.type && msg.message?.type) msg.type = msg.message.type;
-      if (!msg.thread_id && msg.message?.thread_id) msg.thread_id = msg.message.thread_id;
-      if (!msg.parent_message_id && msg.message?.parent_message_id) {
-        msg.parent_message_id = msg.message.parent_message_id;
-      }
-
-      // (5) conversation lookup (frame carries id, not type).
-      const conv = await this.#fetchConversation(orgConfig.org_id, msg.conversation_id);
-      if (conv) conv.id = conv.id || msg.conversation_id;
-
-      // (6) access-policy engine.
-      const decision = await decideInbound(msg, conv || {}, orgConfig, {
-        fetchMemberOwner: this.#fetchMemberOwner,
-      });
-      if (!decision.handle) {
-        this.#log(`drop [${orgConfig.slug}] msg=${msg.id}: ${decision.reason}`);
-        // A policy reject is TERMINAL/consumed — the message will never enter the
-        // runtime context and must not be redelivered forever, so COMMIT the
-        // dedupe + ledger markers here (before posting the notice).
-        commitConsumed();
-        // Reject notice: skip on sync-replay (stale spam) and to AGENT senders
-        // (avoids reject-notice ping-pong) — mirrors comm-bridge exactly.
-        const senderType = String(msg.sender_type || msg.message?.sender_type || '').toUpperCase();
-        const isSyncReplay = notification._via === 'sync';
-        const isAgentSender = senderType === 'AGENT';
-        if (decision.userNotice && !isSyncReplay && !isAgentSender) {
-          this.#sendRejectNotice(orgConfig, msg, decision.userNotice).catch(() => {});
-        }
-        return;
-      }
-
-      // (7) owner hints from the decision — apply in place (parity with
-      // comm-bridge) AND surface via callbacks so the adapter can persist to
-      // config.json. The SDK never writes config itself.
-      if (decision.bindOwnerHint) {
-        const { memberId, displayName } = decision.bindOwnerHint;
-        this.#log(`bind owner (fallback, core had none) [${orgConfig.slug}] member_id=${memberId} name="${displayName}"`);
-        orgConfig.owner = { member_id: memberId, name: displayName || '' };
-        this.callbacks.onOwnerBind?.(orgConfig.slug, memberId, displayName || '');
-      } else if (decision.ownerNameHint) {
-        orgConfig.owner = { ...(orgConfig.owner || {}), name: decision.ownerNameHint };
-        this.callbacks.onOwnerNameHint?.(orgConfig.slug, decision.ownerNameHint);
-      }
-
-      // (8) normalize → deliver. The adapter's InboundDelivery does all C4 /
-      // media / history / formatting from here.
-      //
-      // COMMIT only on {ok:true}. On {ok:false} or a thrown deliver() we do NOT
-      // commit dedupe/ledger and we THROW so:
-      //   - live WS path: frame-dispatch's guard catches → logged, no
-      //     unhandledRejection, markers untouched → redelivered on next /sync;
-      //   - /sync path: the throw aborts the sweep before this event's seq
-      //     advances `sinceSeq`, so the sync cursor never moves past it.
-      const inbound = this.#buildInbound(orgConfig, msg, conv, decision, notification);
-      let res;
+      // We now OWN the reservation. It MUST be resolved on every exit path:
+      // committed on a terminal success/reject, released otherwise. `committed`
+      // tracks which; the finally releases any still-unresolved claim.
+      let committed = false;
       try {
-        res = await this.providers.inbound.deliver(inbound, inbound.endpoint, inbound.priority);
-      } catch (e) {
-        this.#warn(`[${orgConfig.slug}] inbound.deliver threw for msg=${inbound.messageId}: ${e.message} — NOT committing (dedupe/ledger/cursor held for redelivery)`);
-        throw e;   // propagate: hold markers, let live-guard/​sync retry
-      }
-      const ok = res?.ok !== false;
-      this.#log(`deliver [${orgConfig.slug}] ${inbound.conversationType} ${inbound.conversationId} msg=${inbound.messageId} seq=${inbound.seq} ok=${ok}`);
-      if (!ok) {
-        const cls = res?.failureClass ? ` failureClass=${res.failureClass}` : '';
-        const retry = res?.retryAfterMs != null ? ` retryAfterMs=${res.retryAfterMs}` : '';
-        this.#warn(`[${orgConfig.slug}] inbound.deliver returned ok:false for msg=${inbound.messageId}${cls}${retry} — NOT committing (dedupe/ledger/cursor held for redelivery)`);
-        const err = new Error(`inbound delivery failed for msg=${inbound.messageId}`);
-        if (res?.failureClass != null) err.failureClass = res.failureClass;
-        if (res?.retryAfterMs != null) err.retryAfterMs = res.retryAfterMs;
-        throw err;   // propagate: hold markers, let live-guard/​sync retry
-      }
-      // Success → COMMIT the consumed markers, then advance read state.
-      commitConsumed();
-      if (this.reporterOpts.markReadOnDeliver) {
-        this.#markRead(orgConfig, msg.conversation_id, msg.seq);
+        // (2) fetch full message detail and merge over the notification frame.
+        const detail = await this.#fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id);
+        const msg = { ...notification, ...(detail || {}) };
+
+        // (3) inbox-seq ledger. Source priority: sync-frame notification.seq,
+        // else detail.inbox_seq. If the seq is ALREADY recorded, the message was
+        // already consumed → finalize the id claim (commit) and stop.
+        const inboxSeq = (notification._via === 'sync' && typeof notification.seq === 'number')
+          ? notification.seq
+          : (detail?.inbox_seq ?? detail?.message?.inbox_seq ?? null);
+        if (ledger && inboxSeq != null && ledger.has?.(inboxSeq)) {
+          this.#log(`[ws] [${orgConfig.slug}] msg=${notifId} inbox_seq=${inboxSeq} already recorded, skipping`);
+          this.#dedupeCommit(notifId);
+          committed = true;
+          return;
+        }
+
+        // Commit the "consumed" markers. Called on terminal outcomes only:
+        // deliver {ok:true}, or a terminal policy reject.
+        const commitConsumed = () => {
+          this.#dedupeCommit(notifId);
+          if (ledger && inboxSeq != null) ledger.record(inboxSeq);
+          committed = true;
+        };
+
+        // (4) hoist scalar fields the sync-catch-up envelope nests under `message`
+        // so downstream consumers see a uniform shape regardless of arrival path.
+        if (!msg.sender_id && msg.message?.sender_id) msg.sender_id = msg.message.sender_id;
+        if (msg.seq == null && msg.message?.seq != null) msg.seq = msg.message.seq;
+        if (!msg.type && msg.message?.type) msg.type = msg.message.type;
+        if (!msg.thread_id && msg.message?.thread_id) msg.thread_id = msg.message.thread_id;
+        if (!msg.parent_message_id && msg.message?.parent_message_id) {
+          msg.parent_message_id = msg.message.parent_message_id;
+        }
+
+        // (5) conversation lookup (frame carries id, not type).
+        const conv = await this.#fetchConversation(orgConfig.org_id, msg.conversation_id);
+        if (conv) conv.id = conv.id || msg.conversation_id;
+
+        // (6) access-policy engine.
+        const decision = await decideInbound(msg, conv || {}, orgConfig, {
+          fetchMemberOwner: this.#fetchMemberOwner,
+        });
+        if (!decision.handle) {
+          this.#log(`drop [${orgConfig.slug}] msg=${msg.id}: ${decision.reason}`);
+          // A policy reject is TERMINAL/consumed — the message will never enter
+          // the runtime context and must not be redelivered forever, so COMMIT
+          // the dedupe + ledger markers here (before posting the notice).
+          commitConsumed();
+          // Reject notice: skip on sync-replay (stale spam) and to AGENT senders
+          // (avoids reject-notice ping-pong) — mirrors comm-bridge exactly.
+          const senderType = String(msg.sender_type || msg.message?.sender_type || '').toUpperCase();
+          const isSyncReplay = notification._via === 'sync';
+          const isAgentSender = senderType === 'AGENT';
+          if (decision.userNotice && !isSyncReplay && !isAgentSender) {
+            this.#sendRejectNotice(orgConfig, msg, decision.userNotice).catch(() => {});
+          }
+          return;
+        }
+
+        // (7) owner hints from the decision — apply in place (parity with
+        // comm-bridge) AND surface via callbacks so the adapter can persist to
+        // config.json. The SDK never writes config itself.
+        if (decision.bindOwnerHint) {
+          const { memberId, displayName } = decision.bindOwnerHint;
+          this.#log(`bind owner (fallback, core had none) [${orgConfig.slug}] member_id=${memberId} name="${displayName}"`);
+          orgConfig.owner = { member_id: memberId, name: displayName || '' };
+          this.callbacks.onOwnerBind?.(orgConfig.slug, memberId, displayName || '');
+        } else if (decision.ownerNameHint) {
+          orgConfig.owner = { ...(orgConfig.owner || {}), name: decision.ownerNameHint };
+          this.callbacks.onOwnerNameHint?.(orgConfig.slug, decision.ownerNameHint);
+        }
+
+        // (8) normalize → deliver. The adapter's InboundDelivery does all C4 /
+        // media / history / formatting from here.
+        //
+        // COMMIT only on a LITERAL {ok:true} (P1-B). ANY other shape — {ok:false},
+        // {}, undefined, {ok:"yes"}, {ok:1}, or a thrown deliver() — is a
+        // retryable failure: we do NOT commit, we RELEASE the reservation (via
+        // the finally), and we THROW so:
+        //   - live WS path: frame-dispatch's guard catches → logged, no
+        //     unhandledRejection, markers untouched → redelivered on next /sync;
+        //   - /sync path: the throw aborts the sweep before this event's seq
+        //     advances `sinceSeq`, so the sync cursor never moves past it.
+        const inbound = this.#buildInbound(orgConfig, msg, conv, decision, notification);
+        let res;
+        try {
+          res = await this.providers.inbound.deliver(inbound, inbound.endpoint, inbound.priority);
+        } catch (e) {
+          this.#warn(`[${orgConfig.slug}] inbound.deliver threw for msg=${inbound.messageId}: ${e.message} — NOT committing (dedupe/ledger/cursor released for redelivery)`);
+          throw e;   // propagate: release claim (finally), let live-guard/sync retry
+        }
+        const ok = res?.ok === true;   // P1-B: ONLY a literal ok:true is success
+        this.#log(`deliver [${orgConfig.slug}] ${inbound.conversationType} ${inbound.conversationId} msg=${inbound.messageId} seq=${inbound.seq} ok=${ok}`);
+        if (!ok) {
+          const cls = res?.failureClass ? ` failureClass=${res.failureClass}` : '';
+          const retry = res?.retryAfterMs != null ? ` retryAfterMs=${res.retryAfterMs}` : '';
+          this.#warn(`[${orgConfig.slug}] inbound.deliver did not return {ok:true} for msg=${inbound.messageId}${cls}${retry} — NOT committing (dedupe/ledger/cursor released for redelivery)`);
+          const err = new Error(`inbound delivery failed for msg=${inbound.messageId}`);
+          if (res?.failureClass != null) err.failureClass = res.failureClass;
+          if (res?.retryAfterMs != null) err.retryAfterMs = res.retryAfterMs;
+          throw err;   // propagate: release claim (finally), let live-guard/sync retry
+        }
+        // Success → COMMIT the consumed markers, then advance read state.
+        commitConsumed();
+        if (this.reporterOpts.markReadOnDeliver) {
+          this.#markRead(orgConfig, msg.conversation_id, msg.seq);
+        }
+      } finally {
+        // Any exit that did not COMMIT (thrown deliver, {ok:false}/malformed ack,
+        // or an unexpected throw) frees the in-flight reservation so a later
+        // /sync replay can re-reserve and retry (exactly-once, not at-most-once).
+        if (!committed) this.#dedupeRelease(notifId);
       }
     };
   }
@@ -505,55 +557,65 @@ export class CwsAgentBridge {
       }
       const messageId = data.message_id || data.id || data.msg_id || '';
       const dedupKey = `sys:${kind}:${conversationId}:${messageId || payload.event}`;
-      // RESERVE (peek only). The dedupe is COMMITTED only after onSystemNotice
-      // resolves successfully (P1-3) — otherwise a rejecting notice callback would
-      // dedupe (consume) the event and lose it on replay.
-      if (this.#dedupeHas(dedupKey)) {
-        this.#log(`[${orgConfig.slug}] system ${kind} dedup msg=${messageId}`);
+      // ATOMIC RESERVE (synchronous check-and-claim, P1-A). Taken BEFORE the
+      // first await (the conversation fetch) so two concurrent frames for the
+      // same system event can never both fire onSystemNotice. The claim is
+      // COMMITTED only after onSystemNotice resolves successfully (P1-3);
+      // otherwise it is RELEASED so a re-sent frame retries on replay.
+      if (!this.#dedupeReserve(dedupKey)) {
+        this.#log(`[${orgConfig.slug}] system ${kind} dedup msg=${messageId} (committed or in-flight)`);
         return;
       }
 
-      const actorId = data.recalled_by || data.edited_by || data.sender_id || '';
-      const conv = await this.#fetchConversation(orgConfig.org_id, conversationId);
-      const convType = (conv?.type || '').toLowerCase() || 'dm';
-      const syntheticMsg = {
-        conversation_id: conversationId,
-        sender_id: actorId,
-        sender_type: data.sender_type || 'HUMAN',
-      };
-      const decision = await decideInbound(syntheticMsg, conv || {}, orgConfig, {
-        fetchMemberOwner: this.#fetchMemberOwner,
-      });
-      if (!decision.handle) {
-        this.#log(`drop [${orgConfig.slug}] system ${kind} msg=${messageId}: ${decision.reason}`);
-        return;
-      }
-
-      // Adapter formats the notice text (C4 concern) and delivers it. The SDK
-      // provides the classified, policy-gated event plus resolved conversation.
-      // Awaited + try/caught: COMMIT the dedupe ONLY once the adapter callback
-      // resolves successfully. A rejection is logged (no unhandledRejection) and
-      // leaves the event un-deduped so a re-sent frame is retried (P1-3).
-      const endpoint = formatEndpoint({ type: convType, conversationId });
+      let committed = false;
       try {
-        await this.callbacks.onSystemNotice?.(orgConfig, {
-          kind,                 // 'recall' | 'edit'
-          event: payload.event,
-          conversationId,
-          conversation: conv,
-          conversationType: convType,
-          messageId,
-          actorId,
-          senderType: syntheticMsg.sender_type,
-          endpoint,
-          priority: systemEventPriority(syntheticMsg),
-          data,
-          decision,
-          frame,
+        const actorId = data.recalled_by || data.edited_by || data.sender_id || '';
+        const conv = await this.#fetchConversation(orgConfig.org_id, conversationId);
+        const convType = (conv?.type || '').toLowerCase() || 'dm';
+        const syntheticMsg = {
+          conversation_id: conversationId,
+          sender_id: actorId,
+          sender_type: data.sender_type || 'HUMAN',
+        };
+        const decision = await decideInbound(syntheticMsg, conv || {}, orgConfig, {
+          fetchMemberOwner: this.#fetchMemberOwner,
         });
-        this.#dedupeCommit(dedupKey);
-      } catch (e) {
-        this.#warn(`[${orgConfig.slug}] onSystemNotice failed for ${kind} msg=${messageId}: ${e.message} — event not consumed, will retry on replay`);
+        if (!decision.handle) {
+          this.#log(`drop [${orgConfig.slug}] system ${kind} msg=${messageId}: ${decision.reason}`);
+          // Policy drop is re-evaluated cheaply on each replay (mirrors the
+          // original) — RELEASE the reservation (via finally), do not commit.
+          return;
+        }
+
+        // Adapter formats the notice text (C4 concern) and delivers it. The SDK
+        // provides the classified, policy-gated event plus resolved conversation.
+        // Awaited + try/caught: COMMIT the dedupe ONLY once the adapter callback
+        // resolves successfully. A rejection is logged (no unhandledRejection) and
+        // RELEASES the reservation so a re-sent frame is retried (P1-3).
+        const endpoint = formatEndpoint({ type: convType, conversationId });
+        try {
+          await this.callbacks.onSystemNotice?.(orgConfig, {
+            kind,                 // 'recall' | 'edit'
+            event: payload.event,
+            conversationId,
+            conversation: conv,
+            conversationType: convType,
+            messageId,
+            actorId,
+            senderType: syntheticMsg.sender_type,
+            endpoint,
+            priority: systemEventPriority(syntheticMsg),
+            data,
+            decision,
+            frame,
+          });
+          this.#dedupeCommit(dedupKey);
+          committed = true;
+        } catch (e) {
+          this.#warn(`[${orgConfig.slug}] onSystemNotice failed for ${kind} msg=${messageId}: ${e.message} — event not consumed, will retry on replay`);
+        }
+      } finally {
+        if (!committed) this.#dedupeRelease(dedupKey);
       }
     };
   }

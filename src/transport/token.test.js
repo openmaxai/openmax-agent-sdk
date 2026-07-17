@@ -132,3 +132,48 @@ test('exchange throws when no api_key is configured', async () => {
   const tm = new TokenManager({ logger: quietLogger });
   await assert.rejects(() => tm.exchange(''), /api_key not set/);
 });
+
+// ── P1-C: a token request must not follow a redirect off the core origin ───────
+// Every token call carries a Bearer credential; native fetch would re-send it to
+// the redirect target. redirect:'manual' + a same-origin guard fails closed so
+// the credential never leaves cws-core.
+function redirectFetch(steps) {
+  const calls = [];
+  const queue = [...steps];
+  const fn = async (url, opts = {}) => {
+    calls.push({ url, opts, body: opts.body ? JSON.parse(opts.body) : undefined });
+    const s = queue.shift();
+    if (!s) throw new Error('redirectFetch: no more queued responses');
+    const { status = 200, location = null, json } = s;
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (k) => (String(k).toLowerCase() === 'location' ? location : null) },
+      async text() { return JSON.stringify(json ?? {}); },
+    };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test('P1-C: a token request that 302s off the core origin fails closed (credential not leaked)', async () => {
+  const fetch = redirectFetch([{ status: 302, location: 'https://evil.example.com/steal' }]);
+  const tm = new TokenManager({ apiKey: 'cwsk_test', coreUrl: 'http://core.test', fetch, logger: quietLogger });
+  await assert.rejects(() => tm.exchange(''), /cross-origin redirect/);
+  // The redirect target was never requested → the api_key Bearer never reached it.
+  assert.equal(fetch.calls.length, 1, 'redirect target never requested');
+  assert.equal(fetch.calls[0].url, 'http://core.test/auth/agent/token');
+  assert.equal(fetch.calls[0].opts.headers.Authorization, 'Bearer cwsk_test');
+});
+
+test('P1-C: a same-origin token redirect is followed', async () => {
+  const fetch = redirectFetch([
+    { status: 302, location: 'http://core.test/auth/agent/token/v2' },
+    { status: 200, json: { data: { access_token: 'AT', access_token_expires_at: FUTURE, refresh_token: 'R' } } },
+  ]);
+  const tm = new TokenManager({ apiKey: 'cwsk_test', coreUrl: 'http://core.test', fetch, logger: quietLogger });
+  const token = await tm.exchange('');
+  assert.equal(token, 'AT', 'same-origin redirect followed to the token response');
+  assert.equal(fetch.calls.length, 2);
+  assert.equal(fetch.calls[1].url, 'http://core.test/auth/agent/token/v2');
+});

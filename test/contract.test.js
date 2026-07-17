@@ -197,6 +197,12 @@ test('contract: inbound-message fixtures normalize through the SDK and validate 
       if (k === 'decisionReasonIncludes') {
         assert.ok(String(msg.decision?.reason || '').includes(v),
           `${name}: decision.reason "${msg.decision?.reason}" does not include "${v}"`);
+      } else if (k === 'senderIdAbsent') {
+        // P2: the SDK delivered a message with an UNRESOLVED sender — senderId
+        // must be absent (undefined → dropped on the JSON round-trip) yet the
+        // message still validates (senderId is not required).
+        assert.equal(msg.senderId, undefined, `${name}: expected senderId absent`);
+        assert.equal('senderId' in wire, false, `${name}: senderId must not appear on the wire`);
       } else if (k === 'decisionOwnerNameHint') {
         assert.equal(msg.decision?.ownerNameHint, v, `${name}: decision.ownerNameHint mismatch`);
       } else {

@@ -196,3 +196,93 @@ test('P1-2: a cross-origin absolute path through the REST client gets no CF-Acce
   assert.equal(h['CF-Access-Client-Id'], undefined, 'no CF-Access to cross-origin absolute path');
   assert.equal(h.Authorization, undefined, 'no Bearer to cross-origin absolute path');
 });
+
+// ── P1-C: cross-origin redirects must NOT carry credentials (fail-closed) ──────
+// Native fetch auto-follows 3xx and re-sends the request headers to the target.
+// The client uses redirect:'manual' and follows ONLY same-origin/trusted hops,
+// so a redirect from the CWS origin to another origin fails closed — the target
+// origin is never even requested, so no CF-Access / Bearer can reach it.
+
+// A fetch whose responses may be redirects (Location header) and which records
+// every URL it was asked to fetch — so "the second origin was never requested"
+// is directly observable.
+function redirectFetch(steps) {
+  const calls = [];
+  const queue = [...steps];
+  const fn = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    const s = queue.shift();
+    if (!s) throw new Error('redirectFetch: no more queued responses');
+    const { status = 200, location = null, json, text } = s;
+    const bodyText = text !== undefined ? text : JSON.stringify(json ?? { data: {}, request_id: 'r' });
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: `HTTP ${status}`,
+      headers: { get: (k) => (String(k).toLowerCase() === 'location' ? location : null) },
+      async text() { return bodyText; },
+      async arrayBuffer() { return Buffer.from(bodyText); },
+    };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test('P1-C: a credentialed REST call that 302s cross-origin fails closed (target never requested)', async () => {
+  const fetch = redirectFetch([{ status: 302, location: 'https://evil.example.com/steal' }]);
+  const c = cfClient({ fetch });
+  c.setApiKey('jwt-token');
+  await assert.rejects(() => c.get('/me'), /cross-origin redirect/);
+  // Only the trusted CWS origin was fetched; the redirect target got nothing.
+  assert.equal(fetch.calls.length, 1, 'the cross-origin redirect target was never requested');
+  assert.equal(fetch.calls[0].url, 'https://api.cws.test/me');
+  // (the legit first hop carried creds; the point is the SECOND origin did not)
+  assert.equal(fetch.calls[0].opts.headers['CF-Access-Client-Id'], 'cid');
+  assert.equal(fetch.calls[0].opts.headers.Authorization, 'Bearer jwt-token');
+});
+
+test('P1-C: a same-origin REST redirect is still followed (positive control)', async () => {
+  const fetch = redirectFetch([
+    { status: 302, location: 'https://api.cws.test/me/final' },
+    { status: 200, json: { data: { id: 'me1' }, request_id: 'r' } },
+  ]);
+  const c = cfClient({ fetch });
+  c.setApiKey('jwt-token');
+  const out = await c.get('/me');
+  assert.deepEqual(out, { id: 'me1' }, 'same-origin redirect followed to the final 200');
+  assert.equal(fetch.calls.length, 2, 'followed exactly one same-origin hop');
+  assert.equal(fetch.calls[1].url, 'https://api.cws.test/me/final');
+  // Same trusted origin on both hops → creds legitimately re-applied.
+  assert.equal(fetch.calls[1].opts.headers.Authorization, 'Bearer jwt-token');
+  assert.equal(fetch.calls[1].opts.headers['CF-Access-Client-Id'], 'cid');
+});
+
+test('P1-C: a credentialed putBytes that 307s cross-origin fails closed', async () => {
+  const fetch = redirectFetch([{ status: 307, location: 'https://evil.example.com/x' }]);
+  const c = cfClient({ fetch });
+  await assert.rejects(
+    () => c.putBytes('https://api.cws.test/artifacts/upload', Buffer.from('x'), 'image/png'),
+    /cross-origin redirect/,
+  );
+  assert.equal(fetch.calls.length, 1, 'no cross-origin follow — target never requested');
+});
+
+test('P1-C: a credentialed getBytes that 302s cross-origin fails closed', async () => {
+  const fetch = redirectFetch([{ status: 302, location: 'https://evil.example.com/obj' }]);
+  const c = cfClient({ fetch });
+  await assert.rejects(() => c.getBytes('https://api.cws.test/artifacts/download'), /cross-origin redirect/);
+  assert.equal(fetch.calls.length, 1, 'no cross-origin follow — target never requested');
+});
+
+test('P1-C: a NON-credentialed presigned getBytes follows redirects transparently (no regression)', async () => {
+  const fetch = redirectFetch([
+    { status: 302, location: 'https://cdn2.example.com/obj' },
+    { status: 200, text: 'BYTES' },
+  ]);
+  const c = cfClient({ fetch });
+  const buf = await c.getBytes('https://storage.example.com/presigned?sig=a');
+  assert.equal(buf.toString(), 'BYTES', 'presigned cross-origin redirect followed (there are no CWS creds to leak)');
+  assert.equal(fetch.calls.length, 2, 'the presigned redirect was followed');
+  assert.equal(fetch.calls[0].opts.headers['CF-Access-Client-Id'], undefined, 'no CWS creds on hop 1');
+  assert.equal(fetch.calls[1].opts.headers['CF-Access-Client-Id'], undefined, 'no CWS creds on hop 2');
+});

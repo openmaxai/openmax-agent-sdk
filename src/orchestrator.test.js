@@ -500,6 +500,178 @@ test('P1-3: rejecting onConfigEvent is awaited + caught (no unhandledRejection),
   }
 });
 
+// ── P1-A: atomic reserve — concurrent same-id delivery is EXACTLY once ────────
+// The reservation is a SYNCHRONOUS check-and-claim taken before the first await
+// (message-detail fetch / conversation fetch), so two handlers racing on the
+// same id can never both reach deliver()/onSystemNotice(). With the old peek-only
+// has() both would read "not seen" (commit happens post-deliver) and double-fire.
+
+test('P1-A: two concurrent handlers for the SAME message id deliver exactly once', async () => {
+  const { http } = makeHttp(m1Routes());
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const delivered = [];
+  // deliver hangs on a gate so BOTH frames are in-flight simultaneously if the
+  // claim is not atomic.
+  const inbound = { deliver: async (msg) => { delivered.push(msg); await gate; return { ok: true }; } };
+  const { bridge } = makeBridge({ http, orgConfigs: [baseOrg()], inbound });
+  await bridge.start();
+
+  // Fire the same message id twice back-to-back with NO await in between.
+  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+
+  assert.equal(delivered.length, 1, 'concurrent same-id claimed atomically → delivered exactly once');
+  release();
+  await flush();
+  assert.equal(delivered.length, 1, 'still exactly once after the in-flight delivery completes');
+
+  await bridge.stop();
+});
+
+test('P1-A: two concurrent system frames for the SAME event fire onSystemNotice once', async () => {
+  const { http } = makeHttp([
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u), data: { id: 'c1', type: 'dm' } },
+  ]);
+  const notices = [];
+  const inbound = { deliver: async () => ({ ok: true }) };
+  const { bridge } = makeBridge({
+    http, orgConfigs: [baseOrg({ access: { dmPolicy: 'open' } })], inbound,
+    callbacks: { onSystemNotice: async (o, ev) => { notices.push(ev); } },
+  });
+  await bridge.start();
+
+  const recall = {
+    type: 'system',
+    payload: { event: 'message.recalled', conversation_id: 'c1', data: { message_id: 'm1', recalled_by: 'u1' } },
+  };
+  bridge.injectFrame('o1', recall);
+  bridge.injectFrame('o1', recall);
+  await flush();
+
+  assert.equal(notices.length, 1, 'concurrent same system event → onSystemNotice fired exactly once');
+
+  await bridge.stop();
+});
+
+test('P1-A: a failed deliver releases the reservation → a later replay redelivers', async () => {
+  const { http } = makeHttp(m1Routes());
+  const results = [{ ok: false, failureClass: 'wake_failed' }, { ok: true }];
+  let attempt = 0;
+  const delivered = [];
+  const inbound = { deliver: async (msg) => { delivered.push(msg); return results[attempt++] ?? { ok: true }; } };
+  const { bridge } = makeBridge({ http, orgConfigs: [baseOrg()], inbound });
+  await bridge.start();
+
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 1, 'first attempt failed (reservation released, not committed)');
+
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 2, 'reservation was released → replay re-reserved and redelivered');
+
+  await bridge.stop();
+});
+
+// ── P1-B: only a LITERAL {ok:true} is success ────────────────────────────────
+// {}, undefined, {ok:"yes"}, {ok:1} etc. are malformed/absent acks → retryable
+// failures (no commit, redelivered). The old `res?.ok !== false` treated all of
+// these as success and silently committed.
+
+test('P1-B: {}, undefined, {ok:"yes"}, {ok:1} are failures; only {ok:true} commits', async () => {
+  const { http } = makeHttp(m1Routes());
+  const results = [{}, undefined, { ok: 'yes' }, { ok: 1 }, { ok: true }];
+  let attempt = 0;
+  const delivered = [];
+  const inbound = { deliver: async (msg) => { delivered.push(msg); return results[attempt++]; } };
+  const { bridge } = makeBridge({ http, orgConfigs: [baseOrg()], inbound });
+  await bridge.start();
+
+  // Each malformed ack must NOT commit → the message is redelivered on replay,
+  // right up until the literal {ok:true} (attempt 5) finally commits it.
+  for (let i = 1; i <= 5; i++) {
+    bridge.injectFrame('o1', msgFrame());
+    await flush();
+    assert.equal(delivered.length, i, `attempt ${i}: non-true ack (${JSON.stringify(results[i - 1])}) redelivered`);
+  }
+
+  // A 6th replay after the {ok:true} commit is deduped — committed exactly once.
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 5, 'committed exactly once on {ok:true}; no redelivery afterwards');
+
+  await bridge.stop();
+});
+
+test('P1-B: the /sync catch-up path also treats a malformed ack as failure (no cursor advance)', async () => {
+  const { http, fetch } = makeHttp([
+    { match: (u, m) => m === 'POST' && /\/sync$/.test(u),
+      data: { events: [{ message_id: 'm9', conversation_id: 'c1', seq: 6 }], has_more: false, next_cursor: 6 } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1\/messages\/m9$/.test(u),
+      data: { id: 'm9', sender_id: 'u1', seq: 6, type: 'text', inbox_seq: 6,
+        content: { content_type: 'text', body: { text: 'missed' }, attachments: [] } } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u), data: { id: 'c1', type: 'dm' } },
+    { match: (u, m) => m === 'POST' && /\/sync\/ack$/.test(u), data: {} },
+  ]);
+  const saved = [];
+  // deliver returns {} — malformed ack; under strict ok:true this is a failure.
+  const inbound = { deliver: async () => ({}) };
+  const { bridge, sockets } = makeBridge({
+    http, orgConfigs: [baseOrg()], inbound,
+    callbacks: {
+      loadSession: async () => ({ sync_seq: 5 }),
+      saveSession: (slug, partial) => saved.push(partial),
+    },
+  });
+  await bridge.start();
+  await flush();
+  sockets[0].emit('open');
+  await flush(8);
+
+  const advanced = saved.some(p => typeof p.sync_seq === 'number' && p.sync_seq >= 6);
+  assert.equal(advanced, false, 'malformed ack ({}) did NOT advance the sync cursor');
+  const acked = fetch.calls.some(c => c.method === 'POST' && /\/sync\/ack$/.test(c.url));
+  assert.equal(acked, false, 'no /sync/ack for a message whose ack was malformed');
+
+  await bridge.stop();
+});
+
+// ── P1-A: legacy plain-function callbacks.dedupe is accepted with a degraded warning ──
+test('P1-A: a legacy plain-function callbacks.dedupe still works (best-effort, warns)', async () => {
+  const { http } = makeHttp(m1Routes());
+  const warns = [];
+  const legacyLogger = { info() {}, warn: (...a) => warns.push(a.join(' ')), error() {}, debug() {} };
+  const seen = new Set();
+  // Legacy shape: a bare callable with NO reserve()/commit()/release().
+  const legacyDedupe = (id) => { if (seen.has(id)) return true; seen.add(id); return false; };
+
+  const delivered = [];
+  const inbound = { deliver: async (msg) => { delivered.push(msg); return { ok: true }; } };
+  const bridge = new CwsAgentBridge({
+    http,
+    ws: { baseUrl: 'wss://test/ws', urlProvider: async () => 'wss://test/ws?ticket=t', wsFactory: () => new FakeWebSocket() },
+    orgConfigs: [baseOrg()],
+    providers: { inbound, logger: legacyLogger },
+    callbacks: { syncSelf: async () => ({ nameReady: true }), dedupe: legacyDedupe },
+    reporters: { metrics: false, frameMetrics: false, markReadOnDeliver: false },
+  });
+  await bridge.start();
+
+  assert.ok(warns.some(w => /legacy plain-function callbacks\.dedupe/.test(w)),
+    'construction warned about degraded (non-atomic) legacy deduper semantics');
+
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 1, 'legacy deduper delivers the message');
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 1, 'legacy deduper still suppresses a committed duplicate (best-effort)');
+
+  await bridge.stop();
+});
+
 test('config-update frame is handed to onConfigEvent (SDK does not persist)', async () => {
   const { http } = makeHttp([]);
   const inbound = { deliver: async () => ({ ok: true }) };

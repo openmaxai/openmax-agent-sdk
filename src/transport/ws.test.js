@@ -2,7 +2,7 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
-import { WsClient } from './ws.js';
+import { WsClient, createDeduper } from './ws.js';
 
 // Minimal fake of the `ws` WebSocket the client drives. Extends EventEmitter so
 // the client's `.on(...)` handlers wire up exactly as with the real lib. We
@@ -220,4 +220,36 @@ test('stop() clears the ping timer', () => {
   } finally {
     mock.timers.reset();
   }
+});
+
+// ── createDeduper: atomic reserve / commit / release (P1-A) ───────────────────
+
+test('deduper.reserve is an atomic exclusive claim (second reserve of an in-flight id fails)', () => {
+  const d = createDeduper();
+  assert.equal(d.reserve('a'), true, 'first reserve claims the id');
+  assert.equal(d.reserve('a'), false, 'a second reserve while in-flight is rejected');
+  // A different id is independently claimable.
+  assert.equal(d.reserve('b'), true);
+});
+
+test('deduper.commit finalizes a reservation (reserved → seen); re-reserve then fails', () => {
+  const d = createDeduper();
+  assert.equal(d.reserve('a'), true);
+  d.commit('a');
+  assert.equal(d.reserve('a'), false, 'a committed id can never be re-reserved');
+  assert.equal(d.has('a'), true, 'committed id is seen');
+});
+
+test('deduper.release frees an in-flight reservation so it can be re-reserved (retry)', () => {
+  const d = createDeduper();
+  assert.equal(d.reserve('a'), true);
+  d.release('a');
+  assert.equal(d.has('a'), false, 'released id was never committed');
+  assert.equal(d.reserve('a'), true, 'released id is claimable again (replay retry)');
+});
+
+test('deduper legacy callable still check-and-records (returns true on a duplicate)', () => {
+  const d = createDeduper();
+  assert.equal(d('x'), false, 'first sighting records and returns false');
+  assert.equal(d('x'), true, 'second sighting is a duplicate');
 });

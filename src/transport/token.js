@@ -54,6 +54,24 @@ import { memoryStorage } from '../providers.js';
 const REFRESH_MARGIN_MS = 60_000;   // refresh when <60 s remain on access_token
 const LOG = '[token]';
 
+// ── redirect handling (credential-leak guard, P1-C) ──────────────────────────
+// Every token request carries a Bearer credential (api_key on exchange, the
+// access_token on refresh/ws-ticket). Native fetch auto-follows 3xx and re-sends
+// that Authorization header to the target; a cross-origin redirect would leak
+// the credential. We use redirect:'manual' and fail closed on any redirect that
+// leaves the cws-core origin (see _corePostNoAutoFollow).
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+function isRedirectStatus(s) { return REDIRECT_STATUSES.has(s); }
+function readLocation(res) {
+  const h = res?.headers;
+  if (!h || typeof h.get !== 'function') return null;
+  return h.get('location') ?? h.get('Location') ?? null;
+}
+function safeOrigin(u) {
+  try { return new URL(u).origin; } catch { return String(u); }
+}
+const MAX_REDIRECT_HOPS = 5;
+
 // ── RPC logging (env-gated, mirrors the HTTP client) ─────────────────────────
 function rpcLogStdoutEnabled() {
   return process.env.COCO_RPC_LOG !== '0';
@@ -139,6 +157,39 @@ export class TokenManager {
     return p;
   }
 
+  // ── redirect-safe fetch (P1-C) ──────────────────────────────────────────────
+  // Token requests always carry a Bearer credential and always target cws-core.
+  // We disable auto-follow and refuse any redirect that leaves the core origin,
+  // so the credential can never be re-sent to a third party. A same-origin
+  // redirect is followed; a 3xx without a Location is handed back unchanged.
+  async _fetchNoAutoFollow(url, init) {
+    const coreOrigin = safeOrigin(this._resolveCoreUrl());
+    let curUrl = String(url);
+    let curInit = { ...init, redirect: 'manual' };
+    for (let hop = 0; ; hop++) {
+      const res = await this._fetch(curUrl, curInit);
+      if (!isRedirectStatus(res.status)) return res;
+      const loc = readLocation(res);
+      if (!loc) return res;
+      if (hop >= MAX_REDIRECT_HOPS) {
+        throw new Error(`token: too many redirects (>${MAX_REDIRECT_HOPS}) from ${url}`);
+      }
+      let nextUrl;
+      try { nextUrl = new URL(loc, curUrl).toString(); }
+      catch { throw new Error(`token: invalid redirect Location "${loc}" from ${curUrl}`); }
+      if (safeOrigin(nextUrl) !== coreOrigin) {
+        const err = new Error(
+          `token: refusing cross-origin redirect to ${safeOrigin(nextUrl)} that would carry the auth credential (from ${coreOrigin})`,
+        );
+        err.status = res.status;
+        err.code = 'CROSS_ORIGIN_REDIRECT';
+        throw err;
+      }
+      curUrl = nextUrl;
+      if (res.status === 303) curInit = { ...curInit, method: 'GET', body: undefined };
+    }
+  }
+
   // ── raw HTTP helper (no auth dependency) ────────────────────────────────────
   async _corePost(endpoint, body, bearerToken) {
     const url = `${this._resolveCoreUrl()}${endpoint}`;
@@ -152,7 +203,9 @@ export class TokenManager {
       this._logger.log(`[rpc] → POST ${url} req: ${JSON.stringify(body)}`);
     }
 
-    const res = await this._fetch(url, {
+    // Fail-closed on cross-origin redirects so the Bearer credential is never
+    // re-sent off the cws-core origin (P1-C).
+    const res = await this._fetchNoAutoFollow(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
