@@ -340,12 +340,36 @@ export function createDeduper(optsOrLegacyTtl = {}, legacyOpts) {
     flushTimer.unref?.();
   }
 
-  return (id) => {
+  // COMMIT — record `id` as seen. Idempotent; returns true if it was already
+  // present (i.e. a duplicate), false if this call is what recorded it.
+  function commit(id) {
     if (!id) return false;
     if (seen.has(id)) return true;
     seen.set(id, Date.now());
     evictOverflow();
     dirty = true; scheduleFlush();
     return false;
-  };
+  }
+  // PEEK — is `id` already recorded? Does NOT record (no side effects). Lets a
+  // caller RESERVE-then-COMMIT: inspect first, and only commit once the work the
+  // id represents has genuinely succeeded (see orchestrator P1-1/P1-3).
+  function has(id) {
+    if (!id) return false;
+    return seen.has(id);
+  }
+  // ROLLBACK — undo a commit (best-effort). Used when a committed id must be
+  // released because the downstream work failed after all.
+  function rollback(id) {
+    if (!id) return;
+    if (seen.delete(id)) { dirty = true; scheduleFlush(); }
+  }
+
+  // The deduper is callable for backward-compat (legacy check-and-record: returns
+  // true if duplicate, else records + returns false) AND carries has/commit/
+  // rollback so reserve/commit callers can separate inspection from recording.
+  const dedupe = (id) => commit(id);
+  dedupe.has = has;
+  dedupe.commit = commit;
+  dedupe.rollback = rollback;
+  return dedupe;
 }

@@ -115,6 +115,20 @@ export function createInboxLedger(orgSlug, {
     return true;
   }
 
+  /**
+   * PEEK — has this inbox_seq already been recorded (either below the ack
+   * watermark or in the pending set)? Does NOT record it. Lets a caller RESERVE
+   * (inspect) before COMMIT (`record`): the orchestrator must not record a seq
+   * as consumed until delivery genuinely succeeds, or a failed delivery would be
+   * blocked from redelivery on `/sync` replay (P1-1). A non-positive/invalid seq
+   * is never "known" (returns false) — mirrors record() treating it as pass-through.
+   */
+  function has(inboxSeq) {
+    if (typeof inboxSeq !== 'number' || inboxSeq <= 0) return false;
+    if (inboxSeq <= ackedSeq) return true;
+    return received.has(inboxSeq);
+  }
+
   function tick() {
     advanceWatermark();
     if (ackedSeq > lastAckedSeq) {
@@ -174,5 +188,5 @@ export function createInboxLedger(orgSlug, {
 
   function getAckedSeq() { return ackedSeq; }
 
-  return { record, start, stop, setAckedSeq, getAckedSeq, load, tick };
+  return { record, has, start, stop, setAckedSeq, getAckedSeq, load, tick };
 }

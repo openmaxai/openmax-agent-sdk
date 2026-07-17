@@ -291,6 +291,215 @@ test('system recall frame is policy-gated and handed to onSystemNotice (not deli
   await bridge.stop();
 });
 
+// ── P1-1: delivery failure must NOT prematurely commit dedupe/ledger/cursor ──
+// The dedupe + inbox-ledger + sync cursor are "consumed" markers. They must
+// commit ONLY on deliver {ok:true} or a terminal policy reject — never on an
+// {ok:false} or a thrown deliver(), or the message is lost (redelivery blocked).
+
+// Full detail + conversation routes for a c1/m1 message that carries inbox_seq.
+function m1Routes(text = 'hi') {
+  return [
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1\/messages\/m1$/.test(u),
+      data: { id: 'm1', sender_id: 'u1', seq: 7, type: 'text', inbox_seq: 7,
+        content: { content_type: 'text', body: { text }, attachments: [] } } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u),
+      data: { id: 'c1', type: 'dm' } },
+  ];
+}
+
+test('P1-1(a,c,d): deliver {ok:false} is not deduped; redelivered on replay, then committed once', async () => {
+  const { http } = makeHttp(m1Routes());
+  const results = [{ ok: false, failureClass: 'wake_failed', retryAfterMs: 500 }, { ok: true }];
+  let attempt = 0;
+  const delivered = [];
+  const inbound = { deliver: async (msg) => { delivered.push(msg); return results[attempt++] ?? { ok: true }; } };
+  const { bridge } = makeBridge({ http, orgConfigs: [baseOrg()], inbound });
+  await bridge.start();
+
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 1, 'first delivery attempted (returned ok:false)');
+
+  // Replay same message-id: NOT deduped because the failed attempt never committed.
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 2, 'redelivered after the failed attempt (dedupe/ledger not committed)');
+
+  // Third replay lands after the eventual success → deduped, no double-commit.
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 2, 'deduped after a successful delivery (single commit)');
+
+  await bridge.stop();
+});
+
+test('P1-1(b): a thrown deliver() is not swallowed — not deduped, redelivered', async () => {
+  const { http } = makeHttp(m1Routes());
+  let attempt = 0;
+  const delivered = [];
+  const inbound = { deliver: async (msg) => {
+    delivered.push(msg);
+    if (attempt++ === 0) throw new Error('wake boom');
+    return { ok: true };
+  } };
+  const { bridge } = makeBridge({ http, orgConfigs: [baseOrg()], inbound });
+  await bridge.start();
+
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 1, 'first attempt threw');
+
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 2, 'redelivered after a thrown deliver() (no swallow, no premature dedupe)');
+
+  await bridge.stop();
+});
+
+test('P1-1: a failed delivery during /sync does NOT advance the sync cursor or ack', async () => {
+  const { http, fetch } = makeHttp([
+    { match: (u, m) => m === 'POST' && /\/sync$/.test(u),
+      data: { events: [{ message_id: 'm9', conversation_id: 'c1', seq: 6 }], has_more: false, next_cursor: 6 } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1\/messages\/m9$/.test(u),
+      data: { id: 'm9', sender_id: 'u1', seq: 6, type: 'text', inbox_seq: 6,
+        content: { content_type: 'text', body: { text: 'missed' }, attachments: [] } } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u), data: { id: 'c1', type: 'dm' } },
+    { match: (u, m) => m === 'POST' && /\/sync\/ack$/.test(u), data: {} },
+  ]);
+  const saved = [];
+  const inbound = { deliver: async () => ({ ok: false, failureClass: 'wake_failed' }) };
+  const { bridge, sockets } = makeBridge({
+    http, orgConfigs: [baseOrg()], inbound,
+    callbacks: {
+      loadSession: async () => ({ sync_seq: 5 }),
+      saveSession: (slug, partial) => saved.push(partial),
+    },
+  });
+  await bridge.start();
+  await flush();
+  sockets[0].emit('open');   // reconnect → syncMissedEvents from seq 5
+  await flush(8);
+
+  const advanced = saved.some(p => typeof p.sync_seq === 'number' && p.sync_seq >= 6);
+  assert.equal(advanced, false, 'sync cursor did NOT advance past the failed event');
+  const acked = fetch.calls.some(c => c.method === 'POST' && /\/sync\/ack$/.test(c.url));
+  assert.equal(acked, false, 'no /sync/ack posted for a message that failed delivery');
+
+  await bridge.stop();
+});
+
+test('P1-1: a terminal policy reject DOES commit dedupe (consumed, not redelivered)', async () => {
+  const { http } = makeHttp([
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1\/messages\/m1$/.test(u),
+      data: { id: 'm1', sender_id: 'stranger', seq: 3, type: 'text', inbox_seq: 3,
+        content: { content_type: 'text', body: { text: 'hi' }, attachments: [] } } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u), data: { id: 'c1', type: 'dm' } },
+    { match: (u, m) => m === 'POST' && /\/conversations\/c1\/messages$/.test(u), data: { id: 'reject1' } },
+  ]);
+  let rejectPosts = 0;
+  const origFetch = http._fetch;
+  http._fetch = async (url, opts) => {
+    if ((opts?.method || 'GET') === 'POST' && /\/conversations\/c1\/messages$/.test(url)) rejectPosts++;
+    return origFetch(url, opts);
+  };
+  const delivered = [];
+  const inbound = { deliver: async (msg) => { delivered.push(msg); return { ok: true }; } };
+  const org = baseOrg({ access: { dmPolicy: 'owner' } });
+  const { bridge } = makeBridge({ http, orgConfigs: [org], inbound });
+  await bridge.start();
+
+  bridge.injectFrame('o1', msgFrame({ sender_id: 'stranger' }));
+  await flush();
+  assert.equal(delivered.length, 0, 'rejected message never delivered');
+  assert.equal(rejectPosts, 1, 'one reject notice posted');
+
+  // Replay: the reject was terminal/consumed → deduped → no second reject notice.
+  bridge.injectFrame('o1', msgFrame({ sender_id: 'stranger' }));
+  await flush();
+  assert.equal(rejectPosts, 1, 'policy reject committed dedupe — no re-processing on replay');
+
+  await bridge.stop();
+});
+
+// ── P1-3: async adapter callbacks must be awaited + caught ────────────────────
+
+test('P1-3: rejecting onSystemNotice is caught, not deduped (retried), no unhandledRejection', async () => {
+  const rejections = [];
+  const onUnhandled = (e) => rejections.push(e);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const { http } = makeHttp([
+      { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u), data: { id: 'c1', type: 'dm' } },
+    ]);
+    let calls = 0;
+    const inbound = { deliver: async () => ({ ok: true }) };
+    const { bridge } = makeBridge({
+      http, orgConfigs: [baseOrg({ access: { dmPolicy: 'open' } })], inbound,
+      callbacks: { onSystemNotice: async () => { calls += 1; if (calls === 1) throw new Error('notice boom'); } },
+    });
+    await bridge.start();
+
+    const recall = {
+      type: 'system',
+      payload: { event: 'message.recalled', conversation_id: 'c1', data: { message_id: 'm1', recalled_by: 'u1' } },
+    };
+    bridge.injectFrame('o1', recall);
+    await flush();
+    assert.equal(calls, 1, 'onSystemNotice invoked and awaited');
+
+    bridge.injectFrame('o1', recall);
+    await flush();
+    assert.equal(calls, 2, 'event NOT deduped after the rejecting callback — retried on replay');
+
+    bridge.injectFrame('o1', recall);
+    await flush();
+    assert.equal(calls, 2, 'deduped after the notice eventually succeeded (single commit)');
+
+    await flush(6);
+    assert.equal(rejections.length, 0, 'no unhandledRejection escaped from onSystemNotice');
+
+    await bridge.stop();
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled);
+  }
+});
+
+test('P1-3: rejecting onConfigEvent is awaited + caught (no unhandledRejection), retried on replay', async () => {
+  const rejections = [];
+  const onUnhandled = (e) => rejections.push(e);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const { http } = makeHttp([]);
+    let calls = 0;
+    const inbound = { deliver: async () => ({ ok: true }) };
+    const { bridge } = makeBridge({
+      http, orgConfigs: [baseOrg()], inbound,
+      callbacks: { onConfigEvent: async () => { calls += 1; throw new Error('config boom'); } },
+    });
+    await bridge.start();
+
+    const frame = {
+      type: 'system',
+      payload: { event: 'agent.config.dm_policy_changed', data: { agent_member_id: 'self1', policy: 'allowlist' } },
+    };
+    bridge.injectFrame('o1', frame);
+    await flush();
+    assert.equal(calls, 1, 'onConfigEvent invoked and awaited');
+
+    // Config events are not consumed by a failed callback → retried on replay.
+    bridge.injectFrame('o1', frame);
+    await flush();
+    assert.equal(calls, 2, 'config event retried after the rejecting callback');
+
+    await flush(6);
+    assert.equal(rejections.length, 0, 'no unhandledRejection escaped from onConfigEvent');
+
+    await bridge.stop();
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled);
+  }
+});
+
 test('config-update frame is handed to onConfigEvent (SDK does not persist)', async () => {
   const { http } = makeHttp([]);
   const inbound = { deliver: async () => ({ ok: true }) };

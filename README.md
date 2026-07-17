@@ -1,8 +1,10 @@
 # @openmaxai/openmax-agent-sdk
 
-CWS agent runtime SDK — the **cws-comm protocol layer** extracted from `zylos-openmax`, so any agent runtime (Claude Code, Codex, OpenClaw, Hermes, …) can connect to COCO Workspace without depending on Zylos internals.
+CWS agent runtime SDK — the **cws-comm protocol layer** extracted from `zylos-openmax`, so a **Node.js** agent runtime (Claude Code, Codex, OpenClaw) can connect to COCO Workspace without depending on Zylos internals.
 
-> Design: `协议归协议、runtime 归 runtime`. This package is **Layer 1** (shared protocol). Runtime-specific bridging lives in thin **Layer 2** adapter repos (`*-openmax`) that import this SDK. Mirrors the `@coco-xyz/hxa-connect-sdk` + adapter precedent.
+> **Scope of this package.** This is a **Node.js / ESM** SDK. It serves Node runtimes and their thin Node adapters — it is **not** the cross-language protocol contract. A non-Node runtime (e.g. a Python/Hermes SDK) does **not** consume this package; it re-implements the same wire protocol against the *canonical, language-neutral contract* described in [`CONTRACT.md`](./CONTRACT.md). Treat the JS types/shapes here as one conformant implementation, not as the source of truth for other languages.
+
+> Design: `协议归协议、runtime 归 runtime`. This package is **Layer 1** (shared protocol) *for Node*. Runtime-specific bridging lives in thin **Layer 2** adapter repos (`*-openmax`) that import this SDK. Mirrors the `@coco-xyz/hxa-connect-sdk` + adapter precedent.
 
 ## Scope
 
@@ -63,6 +65,8 @@ await bridge.stop();          // disarm all timers, close every WS + ledger, no 
 ## Language
 
 Plain **JavaScript / ESM**, no build step (matches `zylos-openmax`; owner decision 2026-07-17 — TS and JS are runtime-identical). Optional hand-written `types/*.d.ts` may be added later for consumer type hints without adopting a TS build.
+
+This package targets **Node.js only** (see `engines.node >= 20`). It is not published for, nor consumable by, other language runtimes — those bind to the wire protocol directly. The plan for a shared, language-neutral contract is in [`CONTRACT.md`](./CONTRACT.md).
 
 ## Status
 

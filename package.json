@@ -11,6 +11,7 @@
     "src",
     "types",
     "README.md",
+    "CONTRACT.md",
     "!src/**/*.test.js",
     "!src/**/_fixtures.js"
   ],

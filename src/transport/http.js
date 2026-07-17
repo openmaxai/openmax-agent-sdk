@@ -102,6 +102,9 @@ export class CwsHttpClient {
    * @param {string} [opts.deviceId]            X-Device-Id (else COCO_DEVICE_ID env)
    * @param {string} [opts.clientVersion]       X-Client-Version (else COCO_CLIENT_VERSION env)
    * @param {Object} [opts.cfAccess]            cf_access config for CF-Access headers
+   * @param {string[]} [opts.trustedOrigins]    extra origins (besides baseUrl's) that
+   *        MAY receive CWS credentials (CF-Access + Bearer). Presigned S3/GCS/CDN
+   *        and other cross-origin URLs are NEVER credentialed regardless.
    * @param {{getAccessToken:(orgId?:string)=>Promise<string>, invalidate:(orgId?:string)=>void}} [opts.tokenManager]
    * @param {() => string} [opts.resolveDefaultOrgId]  default org (else COCO_ORG_ID env)
    * @param {string} [opts.frontendBasePath]    frontend SPA mount (default /workspace)
@@ -115,6 +118,7 @@ export class CwsHttpClient {
     deviceId,
     clientVersion,
     cfAccess,
+    trustedOrigins,
     tokenManager,
     resolveDefaultOrgId,
     frontendBasePath = '/workspace',
@@ -128,6 +132,7 @@ export class CwsHttpClient {
     this._deviceId = deviceId || '';
     this._clientVersion = clientVersion || '';
     this._cfAccess = cfAccess;
+    this._extraTrustedOrigins = Array.isArray(trustedOrigins) ? trustedOrigins : [];
     this._tokenManager = tokenManager || null;
     this._resolveDefaultOrgId = resolveDefaultOrgId || (() => process.env.COCO_ORG_ID || '');
     this._frontendBasePath = frontendBasePath;
@@ -152,6 +157,39 @@ export class CwsHttpClient {
     if (this._baseUrl) return this._baseUrl;
     if (process.env.COCO_API_URL) return process.env.COCO_API_URL;
     return 'http://127.0.0.1:8080';
+  }
+
+  // ── trusted-origin gate (credential-leak guard, P1-2) ──────────────────────
+  // CWS credentials — CF-Access service-token headers AND the cws-core Bearer/JWT
+  // — must ONLY be attached to requests whose target origin is the trusted CWS
+  // API origin (the configured baseUrl's origin) or an explicit extra allowlist.
+  // Presigned S3/GCS/CDN upload/download URLs and any other arbitrary absolute
+  // URL have a DIFFERENT origin and must receive NONE of these credentials, or
+  // we leak the CWS Access service token (and any Bearer) to a third party.
+  _trustedOrigins() {
+    const set = new Set();
+    const add = (u) => {
+      if (!u) return;
+      try { set.add(new URL(u).origin); }
+      catch { set.add(String(u)); }   // tolerate a bare "https://host:port" origin
+    };
+    add(this._resolveBaseUrl());
+    for (const o of this._extraTrustedOrigins) add(o);
+    return set;
+  }
+
+  /**
+   * Is `url` safe to receive CWS credentials? An absolute URL is trusted only if
+   * its origin is in the trusted set (fail-closed: an unparseable absolute URL is
+   * untrusted). A relative path (no scheme) resolves against baseUrl at request
+   * time, so it is same-origin by construction → trusted.
+   */
+  _isTrustedTarget(url) {
+    const s = String(url || '');
+    let origin;
+    try { origin = new URL(s).origin; }
+    catch { return !/^[a-z][a-z0-9+.-]*:\/\//i.test(s); }   // relative path → trusted
+    return this._trustedOrigins().has(origin);
   }
 
   async _resolveToken(orgId) {
@@ -206,13 +244,19 @@ export class CwsHttpClient {
   async _doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId } = {}) {
     const url = buildUrl(baseUrl, path, query);
 
+    // Only credential a request bound for the trusted CWS origin. `buildUrl`
+    // resolves relative paths against baseUrl (same-origin → trusted); an
+    // absolute cross-origin `path` (e.g. a presigned URL slipped in here) gets
+    // NEITHER CF-Access NOR the Bearer token (P1-2).
+    const trusted = this._isTrustedTarget(url);
+
     const sendOnce = async () => {
       const headers = {
         Accept: 'application/json',
-        ...cfAccessHeaders(this._cfAccess),
+        ...(trusted ? cfAccessHeaders(this._cfAccess) : {}),
         ...(extraHeaders || {}),
       };
-      const token = await this._resolveToken(orgId);
+      const token = trusted ? await this._resolveToken(orgId) : '';
       if (token) headers.Authorization = `Bearer ${token}`;
       if (body !== undefined) headers['Content-Type'] = 'application/json';
 
@@ -373,15 +417,19 @@ export class CwsHttpClient {
   // ── raw helpers (used by upload flows that need direct fetch) ────────────────
 
   /**
-   * PUT raw bytes to an absolute (typically pre-signed) URL. Pre-signed URLs
-   * carry their own auth in the query string, so no Bearer token is added, but
-   * CF-Access headers are injected (the BFF gateway fronts both the API and
-   * artifact storage through the same Cloudflare Access zone).
+   * PUT raw bytes to an absolute URL (typically a pre-signed upload URL).
+   *
+   * CREDENTIAL SAFETY (P1-2): CF-Access service-token headers are injected ONLY
+   * when the URL's origin is the trusted CWS origin (same Cloudflare Access zone
+   * as the API). A presigned S3/GCS/CDN URL — or any other cross-origin URL —
+   * carries its own auth in the query string and gets NONE of the CWS
+   * credentials; only the caller-/server-supplied `extraHeaders` (the
+   * `uploads/prepare` response headers) are sent.
    */
   async putBytes(url, buf, contentType, extraHeaders = {}) {
     const headers = {
       'Content-Type': contentType || 'application/octet-stream',
-      ...cfAccessHeaders(this._cfAccess),
+      ...(this._isTrustedTarget(url) ? cfAccessHeaders(this._cfAccess) : {}),
       ...extraHeaders,
     };
     const res = await this._fetch(url, { method: 'PUT', headers, body: buf });
@@ -395,11 +443,14 @@ export class CwsHttpClient {
   }
 
   /**
-   * GET raw bytes from an absolute URL. Used to follow pre-signed download URLs
-   * returned by cws-as. Mirrors putBytes re: CF Access injection.
+   * GET raw bytes from an absolute URL (typically a pre-signed download URL from
+   * cws-as). Mirrors putBytes: CF-Access headers are attached ONLY for the
+   * trusted CWS origin; a presigned/cross-origin URL receives no CWS credentials
+   * (P1-2).
    */
   async getBytes(url) {
-    const res = await this._fetch(url, { headers: cfAccessHeaders(this._cfAccess) });
+    const headers = this._isTrustedTarget(url) ? cfAccessHeaders(this._cfAccess) : {};
+    const res = await this._fetch(url, { headers });
     if (!res.ok) throw new Error(`GET ${res.status}: ${res.statusText}`);
     return Buffer.from(await res.arrayBuffer());
   }
