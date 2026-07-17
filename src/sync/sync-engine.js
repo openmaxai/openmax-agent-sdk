@@ -84,8 +84,13 @@ export class SyncEngine {
    *
    * @param {{org_id:string, slug:string}} orgConfig
    * @param {{sync_seq:number}} sessionRef  mutable cursor holder (mutated in place)
+   * @param {number|null} [floorSeq]  gap-sync sweep floor (the inbox-ledger's
+   *        durable acked_seq). When supplied, the sweep starts from
+   *        min(sessionRef.sync_seq, floorSeq) so a hole BELOW the persisted
+   *        cursor is re-pulled (issue #5). Omitted/null on the reconnect
+   *        catch-up path → sweeps from the cursor exactly as before.
    */
-  async syncMissedEvents(orgConfig, sessionRef) {
+  async syncMissedEvents(orgConfig, sessionRef, floorSeq = null) {
     if (!sessionRef.sync_seq) return; // first-ever connect → nothing to catch up
     if (this._inFlight.has(orgConfig.slug)) {
       this._log(`[${orgConfig.slug}] sync already in flight, skipping`);
@@ -93,7 +98,16 @@ export class SyncEngine {
     }
     this._inFlight.add(orgConfig.slug);
     try {
-      const startSeq = sessionRef.sync_seq;
+      const cursorSeq = sessionRef.sync_seq;
+      // #5: floor the sweep at the ledger's durable acked_seq when provided. The
+      // sync cursor can legitimately run AHEAD of the delivery watermark (a live
+      // delivery advanced the cursor via a concurrent sweep, then FAILED, so the
+      // ledger never recorded that seq). Sweeping from min(cursor, ack) re-pulls
+      // that hole; replays at/under the cursor are rejected by ledger.has(), so
+      // the lower floor never double-delivers.
+      const startSeq = (typeof floorSeq === 'number' && floorSeq >= 0)
+        ? Math.min(cursorSeq, floorSeq)
+        : cursorSeq;
       let sinceSeq = startSeq;
       let totalSynced = 0;
       let hasMore = true;
@@ -122,13 +136,16 @@ export class SyncEngine {
       }
 
       // Persist the sync cursor (inbox seq) so the next reconnect resumes here.
-      if (sinceSeq > startSeq) {
-        sessionRef.sync_seq = sinceSeq;
-        this.saveSession(orgConfig.slug, { sync_seq: sinceSeq });
+      // Never rewind: a lower gap-sync floor must not move the durable cursor
+      // backwards (seqs above the floor stay consumed — deduped on any replay).
+      const newCursor = Math.max(cursorSeq, sinceSeq);
+      if (newCursor > cursorSeq) {
+        sessionRef.sync_seq = newCursor;
+        this.saveSession(orgConfig.slug, { sync_seq: newCursor });
       }
 
       if (totalSynced > 0) {
-        this._log(`[${orgConfig.slug}] sync caught up ${totalSynced} event(s) since seq=${startSeq}, new sync_seq=${sinceSeq}` +
+        this._log(`[${orgConfig.slug}] sync caught up ${totalSynced} event(s) since seq=${startSeq}, new sync_seq=${sessionRef.sync_seq}` +
           (hasMore && totalSynced >= this.maxEvents ? ` (hit per-sweep cap, more on next reconnect)` : ''));
       }
       // Ack the highest processed seq to cws-comm (best-effort).

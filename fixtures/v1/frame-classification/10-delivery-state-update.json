@@ -1,0 +1,5 @@
+{
+  "description": "A delivery_state_update frame classifies as 'presence' (acknowledged + dropped, not 'unknown'). cws-comm emits these around each message delivery/read; they are transport/presence noise (issue #6).",
+  "input": { "type": "delivery_state_update", "payload": { "conversation_id": "c1", "message_id": "m1", "state": "delivered" } },
+  "expected": "presence"
+}

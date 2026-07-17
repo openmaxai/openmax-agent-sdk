@@ -5,6 +5,7 @@ import WebSocket from 'ws';
 import { CwsAgentBridge } from './orchestrator.js';
 import { CwsHttpClient } from './transport/http.js';
 import { createDeduper } from './transport/ws.js';
+import { memoryStorage } from './providers.js';
 
 // Keep tests hermetic regardless of ambient CWS env config.
 for (const k of ['COCO_API_URL', 'COCO_API_KEY', 'COCO_ORG_ID', 'COCO_USER_TOKEN',
@@ -87,7 +88,7 @@ function makeHttp(routes) {
   return { http, fetch };
 }
 
-function makeBridge({ http, orgConfigs, inbound, callbacks = {}, reporters = {}, ws = {} }) {
+function makeBridge({ http, orgConfigs, inbound, callbacks = {}, reporters = {}, ws = {}, storage }) {
   const sockets = [];
   const bridge = new CwsAgentBridge({
     http,
@@ -98,7 +99,7 @@ function makeBridge({ http, orgConfigs, inbound, callbacks = {}, reporters = {},
       ...ws,
     },
     orgConfigs,
-    providers: { inbound, logger: quietLogger },
+    providers: { inbound, logger: quietLogger, ...(storage ? { storage } : {}) },
     // syncSelf reports ready immediately so the self-name hydration barrier
     // resolves on the first attempt (no retry backoff) in tests.
     callbacks: { syncSelf: async () => ({ nameReady: true }), ...callbacks },
@@ -756,6 +757,50 @@ test('config-update frame is handed to onConfigEvent (SDK does not persist)', as
   assert.equal(events.length, 1, 'onConfigEvent fired');
   assert.equal(events[0].event, 'agent.config.dm_policy_changed');
   assert.equal(events[0].data.policy, 'allowlist');
+
+  await bridge.stop();
+});
+
+// ── #4: restart with a stale session cursor must NOT lose messages ────────────
+// The ledger persists acked_seq on every record (durable), but the session
+// cursor only advances on the 5s onAck tick. A process that stops before that
+// tick fires leaves a stale/0 session sync_seq while the ledger's acked_seq is
+// higher. On restart the SDK must seed sync_seq from the ledger's durable
+// acked_seq so onOpen takes the /sync catch-up path — NOT initSyncSeq (seek to
+// inbox end), which would silently discard everything that arrived while down.
+
+test('#4: restart with a stale session cursor seeds sync_seq from the ledger acked_seq (no message loss)', async () => {
+  const { http } = makeHttp([
+    { match: (u, m) => m === 'POST' && /\/sync$/.test(u),
+      data: { events: [{ message_id: 'm9', conversation_id: 'c1', seq: 6 }], has_more: false, next_cursor: 6 } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1\/messages\/m9$/.test(u),
+      data: { id: 'm9', sender_id: 'u1', seq: 6, type: 'text', inbox_seq: 6,
+        content: { content_type: 'text', body: { text: 'missed during restart' }, attachments: [] } } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u), data: { id: 'c1', type: 'dm' } },
+    { match: (u, m) => m === 'POST' && /\/sync\/ack$/.test(u), data: {} },
+  ]);
+  // Durable ledger recorded acked_seq=5, but the 5s onAck tick never wrote the
+  // session file before the restart → loadSession returns a stale sync_seq of 0.
+  const storage = memoryStorage();
+  await storage.set('inbox-o1.json', JSON.stringify({ acked_seq: 5, received: [] }));
+
+  const delivered = [];
+  const inbound = { deliver: async (msg) => { delivered.push(msg); return { ok: true }; } };
+  const { bridge, sockets } = makeBridge({
+    http, orgConfigs: [baseOrg()], inbound, storage,
+    callbacks: { loadSession: async () => ({ sync_seq: 0 }) },
+  });
+  await bridge.start();
+  await flush();
+  sockets[0].emit('open');   // WS open → onOpen path selection
+  await flush(8);
+
+  // Fix: sync_seq seeded from ledger acked_seq(5) → reconnect catch-up re-pulls
+  // and delivers m9. Bug: sync_seq stays 0 → initSyncSeq seeks to inbox end and
+  // m9 is discarded (delivered.length === 0).
+  assert.equal(delivered.length, 1, 'the message that arrived during the restart window was recovered');
+  assert.equal(delivered[0].messageId, 'm9');
+  assert.equal(delivered[0].via, 'sync');
 
   await bridge.stop();
 });

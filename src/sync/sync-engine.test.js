@@ -157,6 +157,58 @@ test('syncMissedEvents: swallows errors (best-effort, retried on next reconnect)
   assert.ok(warns.some((w) => /sync failed/.test(w)));
 });
 
+// ── #5: gap-sync floor — re-pull a hole BELOW the persisted cursor ────────────
+// The inbox-ledger calls onGapSync(ackedSeq) with its DURABLE watermark. When
+// the sync cursor has run ahead of that watermark (a live delivery advanced the
+// cursor via a concurrent sweep, then FAILED, so the ledger never recorded that
+// seq), the sweep must start from the lower floor or the hole is unrecoverable.
+
+test('syncMissedEvents: gap-sync floor re-pulls a hole below the cursor (issue #5)', async () => {
+  const seen = [];
+  const allEvents = [
+    { message_id: 'm8', conversation_id: 'c1', seq: 8 },
+    { message_id: 'm9', conversation_id: 'c1', seq: 9 },
+    { message_id: 'm10', conversation_id: 'c1', seq: 10 },
+  ];
+  // Realistic /sync: only returns events strictly above the requested since_seq.
+  const http = fakeHttp({
+    [SYNC]: (body) => ({ events: allEvents.filter((e) => e.seq > body.since_seq), has_more: false }),
+  });
+  const engine = new SyncEngine({ http, onMessage: async (ev) => seen.push(ev), logger: quiet });
+  // cursor=10 (ahead), ledger acked_seq=7 passed as the floor → sweep from 7.
+  const sessionRef = { sync_seq: 10 };
+  await engine.syncMissedEvents(org, sessionRef, 7);
+
+  assert.equal(http.calls[0].body.since_seq, 7, 'sweep floored at the ledger acked_seq, not the cursor');
+  assert.deepEqual(seen.map((e) => e.id), ['m8', 'm9', 'm10'],
+    'the hole at seq 8 (below the cursor) was re-pulled');
+});
+
+test('syncMissedEvents: a lower gap-sync floor never rewinds the persisted cursor', async () => {
+  const saved = [];
+  // Only seq 8 comes back (nothing above the cursor).
+  const http = fakeHttp({
+    [SYNC]: (body) => ({ events: [{ message_id: 'm8', conversation_id: 'c1', seq: 8 }].filter((e) => e.seq > body.since_seq), has_more: false }),
+  });
+  const engine = new SyncEngine({
+    http, onMessage: async () => {},
+    saveSession: (slug, partial) => saved.push(partial), logger: quiet,
+  });
+  const sessionRef = { sync_seq: 10 };
+  await engine.syncMissedEvents(org, sessionRef, 7);
+  assert.equal(sessionRef.sync_seq, 10, 'cursor held at 10 — a lower-floor sweep does not rewind it');
+  assert.deepEqual(saved, [], 'no cursor persist when the sweep would only lower it');
+});
+
+test('syncMissedEvents: an omitted floor sweeps from the cursor exactly as before', async () => {
+  const http = fakeHttp({
+    [SYNC]: pager([{ events: [{ message_id: 'm1', conversation_id: 'c1', seq: 11 }], has_more: false }]),
+  });
+  const engine = new SyncEngine({ http, onMessage: async () => {}, logger: quiet });
+  await engine.syncMissedEvents(org, { sync_seq: 10 }); // no floor arg
+  assert.equal(http.calls[0].body.since_seq, 10, 'no floor → sweeps from the cursor');
+});
+
 test('initSyncSeq: seeks to the inbox end via next_cursor and persists', async () => {
   const saved = [];
   const http = fakeHttp({

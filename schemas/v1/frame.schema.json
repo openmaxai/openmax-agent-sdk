@@ -35,7 +35,7 @@
     },
     "FrameType": {
       "title": "FrameType",
-      "description": "Known wire `type` values. `message`->message, `message_ack`->message_ack, `system`->system, `error`->error, `ping`/`pong`->heartbeat, `typing`/`presence`/`read_receipt`/`read_state_update`->presence. Any other string is allowed on the wire and classifies as `unknown`.",
+      "description": "Known wire `type` values. `message`->message, `message_ack`->message_ack, `system`->system, `error`->error, `ping`/`pong`->heartbeat, `typing`/`presence`/`read_receipt`/`read_state_update`/`delivery_state_update`->presence. Any other string is allowed on the wire and classifies as `unknown`.",
       "type": "string"
     },
     "MessageNotification": {
