@@ -92,7 +92,7 @@
       "properties": {
         "handle": { "const": true },
         "reason": { "type": "string" },
-        "mode": { "type": "string", "enum": ["smart", "mention", "silent"], "description": "Group mode (group/thread branch only)." },
+        "mode": { "type": "string", "enum": ["smart", "mention", "silent"], "description": "Group mode (group/thread branch only). 'smart' = handle every message in the allowlisted group without requiring an @-mention. 'mention' = only handle when the agent is @-mentioned; non-mention traffic is dropped (handle:false) and never delivered. 'silent' = OBSERVE-ONLY: the message IS delivered to the agent (handle:true) so it can update per-conversation context (participant/@mention registry, group history) and nothing is lost, but the adapter MUST NOT auto-reply to a silent-mode delivery. All four *-openmax adapters treat 'silent' as deliver-but-do-not-respond (the zylos 静默生命周期缓冲 analog)." },
         "mentioned": { "type": "boolean" },
         "groupCfg": { "type": ["object", "null"], "additionalProperties": true },
         "ownerNameHint": { "type": "string", "description": "Owner display name to persist (DM owner-exempt first-name-fill)." },
