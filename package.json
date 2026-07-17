@@ -10,7 +10,9 @@
   "files": [
     "src",
     "types",
-    "README.md"
+    "README.md",
+    "!src/**/*.test.js",
+    "!src/**/_fixtures.js"
   ],
   "scripts": {
     "test": "node --test",
