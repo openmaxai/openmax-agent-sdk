@@ -25,9 +25,14 @@ export * from './protocol/frame-dispatch.js';  // classifyFrame, classifySystemE
 export * from './protocol/access-policy.js';   // decideInbound, isSiblingAgentSender, extractMentions, isSelfNameMentionedInText, notices, VALID_* sets
 export * from './protocol/system-message.js';  // isSystemSender, systemEventPriority
 
+// ── service clients (Phase A · milestone 3) ─────────────────────────────────
+// Programmatic REST clients for the cws-core surface (tm/kb/as/comm/core/conn),
+// each taking the shared CwsHttpClient. Extracted from zylos-openmax
+// src/cli/*.js; the argv/stdout CLI shell stays in the runtime adapter.
+export * from './services/index.js';  // {Tm,Kb,As,Comm,Core,Conn}Service + create* factories
+
 // Extraction roadmap (uncomment as each tranche lands):
 // export * from './sync/sync-engine.js';
-// export * from './services/index.js';
 // export * from './orchestrator.js';
 
 export const SDK_VERSION = '0.1.0-alpha.0';
