@@ -57,7 +57,14 @@ export * from './reporters/billing.js';   // isOrgLLMSuspended, resolveAgentOrig
 export * from './identity/agent-domain.js';          // resolveAgentBaseUrl, resolveAgentIdentityId, normalizeBaseUrl
 export * from './identity/self-name-hydration.js';   // createSelfNameHydrator
 
-// Extraction roadmap (uncomment as each tranche lands):
-// export * from './orchestrator.js';
+// ── orchestrator (Phase A · milestone 5) — the integration surface ───────────
+// CwsAgentBridge composes every extracted piece (transport/protocol/sync/
+// reporters/identity) into one instantiable class: per-org WS lifecycle,
+// dedupe→normalize→access-policy→InboundDelivery inbound pipeline, frame
+// dispatch, ledger↔sync-engine wiring, and protocol-generic system-frame
+// handling. Runtime-specific work (C4 forwarding, formatInboundForC4, media,
+// history, config.json persistence, pm2/channel install/liveness, auto-upgrade,
+// CLI shells) stays in the adapter behind the injected providers/callbacks.
+export * from './orchestrator.js';   // CwsAgentBridge
 
 export const SDK_VERSION = '0.1.0-alpha.0';

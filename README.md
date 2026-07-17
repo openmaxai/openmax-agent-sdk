@@ -35,10 +35,35 @@ The SDK is environment-agnostic. A runtime adapter supplies:
 
 Each provider has a safe no-op/degraded default.
 
+## Orchestrator — the integration surface
+
+`CwsAgentBridge` (`src/orchestrator.js`) is the one class an adapter instantiates. It composes every module above into a working agent: per-org WS lifecycle (open → first-connect `initSyncSeq` or reconnect catch-up → seed inbox-ledger → arm reporters → self-name hydration barrier), the protocol-generic inbound pipeline (**dedupe → fetch detail → normalize → access-policy `decideInbound` → `InboundDelivery.deliver`**), frame dispatch, ledger↔sync-engine wiring, and protocol-generic system-frame handling.
+
+```js
+const bridge = new CwsAgentBridge({
+  http,                       // CwsHttpClient
+  tokenManager,               // TokenManager (mints ws-tickets; optional in tests)
+  ws: { baseUrl, reconnectMaxMs, heartbeatIntervalMs, pingIntervalMs, deviceId, clientVersion },
+  orgConfigs,                 // [{ slug, org_id, self, owner, access }]
+  providers: { storage, runtimeState, inbound, logger },   // inbound is the required seam
+  callbacks: { /* adapter seams, all optional — see below */ },
+  reporters: { metrics, metricsIntervalMs, version },
+});
+await bridge.start();         // bootstrap tokens + self-name, open WS pool, arm reporters
+await bridge.send(endpoint, content, { orgId, replyTo });   // outbound reply → cws-core
+await bridge.stop();          // disarm all timers, close every WS + ledger, no leaks
+```
+
+**Required:** `providers.inbound.deliver(msg, endpoint, priority)` — the SDK hands it a normalized `InboundMessage` after access policy; the adapter does the actual runtime bridging (Cat.A native channel / Cat.B `POST /wake`). INVARIANT: resolve `{ok:true}` only once the message genuinely entered the runtime context (a false ack loses the message — the ledger/`/sync` retry stops).
+
+**Adapter callbacks (seams the SDK never implements):** `loadSession`/`saveSession` (sync cursor), `loadConfig`/`syncSelf` (self-name hydration inputs), `fetchMemberOwner` (sibling-agent DM exemption), `onOwnerBind`/`onOwnerNameHint` (owner hints → config), `onConfigEvent` (`agent.config.*` → **adapter persists**, SDK does not), `onSystemNotice` (policy-gated recall/edit → **adapter formats + delivers**), `onConnectionEvent`/`onChannelEvent` (connection/channel frames → adapter), `onOrgTerminated`/`onAllOrgsTerminated`.
+
+**Still adapter-owned** (behind `InboundDelivery` / callbacks): C4 forwarding + `formatInboundForC4` + work-reference formatting, media download, group-history/context assembly, quoted-message expansion, receive-reactions/typing, `config.json` persistence, pm2 channel install/liveness, auto-upgrade, the argv CLI shells, and dashboard/api-key provisioning. The `orchestrator.js` header block enumerates the full contract.
+
 ## Language
 
 Plain **JavaScript / ESM**, no build step (matches `zylos-openmax`; owner decision 2026-07-17 — TS and JS are runtime-identical). Optional hand-written `types/*.d.ts` may be added later for consumer type hints without adopting a TS build.
 
 ## Status
 
-`0.1.0-alpha.0` — scaffold. Extraction in progress (Phase A). See the design doc for the full module map, cut line, wake contract, and migration phasing.
+`0.1.0-alpha.0` — **Phase A extraction complete**: transport, protocol, sync, services (tm/kb/as/comm/core/conn), reporters (agent-level), identity, and the `CwsAgentBridge` orchestrator — **244 tests, 0 coupling to Zylos internals**. Next: Phase B — refactor `zylos-openmax` to consume this SDK, then int→prod parity verification (WS keepalive/watchdog focus). See the design doc for the full module map, cut line, wake contract, and migration phasing.

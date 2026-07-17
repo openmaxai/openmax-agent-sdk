@@ -1,0 +1,315 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import WebSocket from 'ws';
+import { CwsAgentBridge } from './orchestrator.js';
+import { CwsHttpClient } from './transport/http.js';
+
+// Keep tests hermetic regardless of ambient CWS env config.
+for (const k of ['COCO_API_URL', 'COCO_API_KEY', 'COCO_ORG_ID', 'COCO_USER_TOKEN',
+  'COCO_AUTH_TOKEN', 'COCO_API_PREFIX', 'COCO_DEVICE_ID', 'COCO_CLIENT_VERSION', 'COCO_RPC_LOG']) {
+  delete process.env[k];
+}
+process.env.COCO_RPC_LOG = '0';   // silence the http client's stdout RPC log
+
+const quietLogger = { info() {}, warn() {}, error() {}, debug() {} };
+
+// Fetch that routes by URL/method and records every call. Responses are
+// D8-wrapped ({data, request_id}) so the http client's envelope unwrap fires.
+function routingFetch(routes = []) {
+  const calls = [];
+  const fn = async (url, opts = {}) => {
+    const method = opts.method || 'GET';
+    calls.push({ url, method, opts });
+    for (const r of routes) {
+      if (r.match(url, method)) {
+        const status = r.status ?? 200;
+        const body = JSON.stringify(r.body ?? { data: r.data ?? {}, request_id: 'r' });
+        return mkRes(status, body);
+      }
+    }
+    // Default: empty D8 single envelope.
+    return mkRes(200, JSON.stringify({ data: {}, request_id: 'r' }));
+  };
+  fn.calls = calls;
+  return fn;
+}
+function mkRes(status, body) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: `HTTP ${status}`,
+    async text() { return body; },
+    async arrayBuffer() { return Buffer.from(body); },
+  };
+}
+
+// Minimal fake of the `ws` socket the WsClient drives (mirrors ws.test.js).
+class FakeWebSocket extends EventEmitter {
+  constructor() {
+    super();
+    this.readyState = WebSocket.OPEN;
+    this.closed = false;
+    this.terminateCount = 0;
+  }
+  ping() {}
+  terminate() { this.terminateCount += 1; }
+  send() {}
+  close() { this.closed = true; }
+}
+
+function flush(n = 4) {
+  // Drain the microtask + immediate queues so the async inbound chain settles.
+  return new Promise((resolve) => {
+    let i = 0;
+    const tick = () => (++i >= n ? resolve() : setImmediate(tick));
+    setImmediate(tick);
+  });
+}
+
+function baseOrg(overrides = {}) {
+  return {
+    slug: 'o1',
+    org_id: 'org1',
+    org_name: 'Org One',
+    self: { member_id: 'self1', display_name: 'Bot' },
+    owner: { member_id: 'owner1', name: 'Owner' },
+    access: { dmPolicy: 'open' },
+    ...overrides,
+  };
+}
+
+function makeHttp(routes) {
+  const fetch = routingFetch(routes);
+  const http = new CwsHttpClient({ baseUrl: 'http://api.test', fetch, logger: quietLogger });
+  http.setApiKey('test-key'); // short-circuit the token manager
+  return { http, fetch };
+}
+
+function makeBridge({ http, orgConfigs, inbound, callbacks = {}, reporters = {}, ws = {} }) {
+  const sockets = [];
+  const bridge = new CwsAgentBridge({
+    http,
+    ws: {
+      baseUrl: 'wss://test/ws',
+      urlProvider: async () => 'wss://test/ws?ticket=t',
+      wsFactory: () => { const s = new FakeWebSocket(); sockets.push(s); return s; },
+      ...ws,
+    },
+    orgConfigs,
+    providers: { inbound, logger: quietLogger },
+    // syncSelf reports ready immediately so the self-name hydration barrier
+    // resolves on the first attempt (no retry backoff) in tests.
+    callbacks: { syncSelf: async () => ({ nameReady: true }), ...callbacks },
+    reporters: { metrics: false, frameMetrics: false, markReadOnDeliver: false, ...reporters },
+  });
+  return { bridge, sockets };
+}
+
+const msgFrame = (over = {}) => ({
+  type: 'message',
+  payload: { id: 'm1', conversation_id: 'c1', sender_id: 'u1', ...over },
+});
+
+test('inbound message frame flows dedupe → normalize → access-policy → deliver', async () => {
+  const { http, fetch } = makeHttp([
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1\/messages\/m1$/.test(u),
+      data: { id: 'm1', sender_id: 'u1', seq: 7, type: 'text', inbox_seq: 7,
+        content: { content_type: 'text', body: { text: 'hello' }, attachments: [] } } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u),
+      data: { id: 'c1', type: 'dm', name: 'DM' } },
+  ]);
+  const delivered = [];
+  const inbound = { deliver: async (msg, endpoint, priority) => { delivered.push({ msg, endpoint, priority }); return { ok: true }; } };
+
+  const { bridge } = makeBridge({ http, orgConfigs: [baseOrg()], inbound });
+  await bridge.start();
+
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+
+  assert.equal(delivered.length, 1, 'deliver called once');
+  const d = delivered[0];
+  assert.equal(d.msg.conversationId, 'c1');
+  assert.equal(d.msg.conversationType, 'dm');
+  assert.equal(d.msg.messageId, 'm1');
+  assert.equal(d.msg.senderId, 'u1');
+  assert.equal(d.msg.text, 'hello', 'normalized text extracted from detail');
+  assert.equal(d.msg.decision.handle, true);
+  assert.match(d.msg.decision.reason, /dm:open/);
+  assert.equal(d.endpoint, 'c1', 'endpoint formatted from the conversation');
+  assert.ok(d.msg.message, 'raw merged frame passed through for the adapter');
+
+  // Dedupe: re-injecting the same message id delivers nothing more.
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 1, 'duplicate message_id deduped');
+
+  await bridge.stop();
+});
+
+test('access-policy rejection does NOT call deliver (and posts a reject notice)', async () => {
+  const { http, fetch } = makeHttp([
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1\/messages\/m1$/.test(u),
+      data: { id: 'm1', sender_id: 'stranger', seq: 3, type: 'text',
+        content: { content_type: 'text', body: { text: 'hi' }, attachments: [] } } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u),
+      data: { id: 'c1', type: 'dm' } },
+    // reject-notice POST (owner-policy drop with userNotice) — accept it.
+    { match: (u, m) => m === 'POST' && /\/conversations\/c1\/messages$/.test(u),
+      data: { id: 'reject1' } },
+  ]);
+  const delivered = [];
+  const inbound = { deliver: async (msg) => { delivered.push(msg); return { ok: true }; } };
+
+  // dmPolicy 'owner' with a bound owner → a stranger's DM is rejected.
+  const org = baseOrg({ access: { dmPolicy: 'owner' } });
+  const { bridge } = makeBridge({ http, orgConfigs: [org], inbound });
+  await bridge.start();
+
+  bridge.injectFrame('o1', msgFrame({ sender_id: 'stranger' }));
+  await flush();
+
+  assert.equal(delivered.length, 0, 'rejected message never delivered');
+  const posted = fetch.calls.some(c => c.method === 'POST' && /\/conversations\/c1\/messages$/.test(c.url));
+  assert.ok(posted, 'a reject notice was posted to cws-core');
+
+  await bridge.stop();
+});
+
+test('reconnect (onOpen with a warm sync_seq) triggers a /sync catch-up', async () => {
+  const { http, fetch } = makeHttp([
+    // /sync sweep returns one event then stops.
+    { match: (u, m) => m === 'POST' && /\/sync$/.test(u),
+      data: { events: [{ message_id: 'm9', conversation_id: 'c1', seq: 6 }], has_more: false, next_cursor: 6 } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1\/messages\/m9$/.test(u),
+      data: { id: 'm9', sender_id: 'u1', seq: 6, type: 'text',
+        content: { content_type: 'text', body: { text: 'missed' }, attachments: [] } } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u),
+      data: { id: 'c1', type: 'dm' } },
+    { match: (u, m) => m === 'POST' && /\/sync\/ack$/.test(u), data: {} },
+  ]);
+  const delivered = [];
+  const inbound = { deliver: async (msg) => { delivered.push(msg); return { ok: true }; } };
+
+  // loadSession seeds a warm cursor so onOpen takes the reconnect (catch-up) path.
+  const { bridge, sockets } = makeBridge({
+    http, orgConfigs: [baseOrg()], inbound,
+    callbacks: { loadSession: async () => ({ sync_seq: 5 }) },
+  });
+  await bridge.start();
+  await flush();
+
+  // Drive the WS open on the fake socket → onOpen → syncMissedEvents.
+  assert.ok(sockets[0], 'a socket was created');
+  sockets[0].emit('open');
+  await flush(8);
+
+  const syncCalled = fetch.calls.some(c => c.method === 'POST' && /\/sync$/.test(c.url));
+  assert.ok(syncCalled, 'reconnect ran a /sync catch-up sweep');
+  assert.equal(delivered.length, 1, 'the caught-up event flowed through the pipeline to deliver');
+  assert.equal(delivered[0].messageId, 'm9');
+  assert.equal(delivered[0].via, 'sync');
+
+  await bridge.stop();
+});
+
+test('start() arms periodic timers and stop() clears them + all orgs', async () => {
+  const { http } = makeHttp([]);
+  const inbound = { deliver: async () => ({ ok: true }) };
+  const runtimeState = { async getMetrics() { return {}; } };
+
+  const bridge = new CwsAgentBridge({
+    http,
+    ws: {
+      baseUrl: 'wss://test/ws',
+      urlProvider: async () => 'wss://test/ws?ticket=t',
+      wsFactory: () => new FakeWebSocket(),
+    },
+    orgConfigs: [baseOrg()],
+    providers: { inbound, runtimeState, logger: quietLogger },
+    callbacks: { syncSelf: async () => ({ nameReady: true }) },
+    // metrics + frame-metrics timers both armed.
+    reporters: { metrics: true, frameMetrics: true, metricsIntervalMs: 60000 },
+  });
+
+  await bridge.start();
+  assert.ok(bridge._timers.length >= 2, 'metrics + frame-metrics timers armed');
+  assert.equal(bridge._orgs.size, 1, 'one org runtime record');
+
+  await bridge.stop();
+  assert.equal(bridge._timers.length, 0, 'all periodic timers cleared');
+  assert.equal(bridge._orgs.size, 0, 'all org records torn down');
+  assert.equal(bridge._liveOrgCount, 0);
+});
+
+test('send() posts an AGENT_TEXT to the endpoint conversation and returns messageId', async () => {
+  const { http, fetch } = makeHttp([
+    { match: (u, m) => m === 'POST' && /\/conversations\/c5\/messages$/.test(u),
+      data: { id: 'out1' } },
+  ]);
+  const inbound = { deliver: async () => ({ ok: true }) };
+  const { bridge } = makeBridge({ http, orgConfigs: [baseOrg()], inbound });
+
+  const res = await bridge.send('c5|reply:p9', 'hi there', { orgId: 'org1' });
+  assert.equal(res.messageId, 'out1');
+  const call = fetch.calls.find(c => c.method === 'POST' && /\/conversations\/c5\/messages$/.test(c.url));
+  assert.ok(call, 'posted to the right conversation');
+  const body = JSON.parse(call.opts.body);
+  assert.equal(body.type, 'AGENT_TEXT');
+  assert.equal(body.content.body.text, 'hi there');
+  assert.equal(body.parent_id, 'p9', 'reply parent parsed from endpoint');
+});
+
+test('system recall frame is policy-gated and handed to onSystemNotice (not deliver)', async () => {
+  const { http } = makeHttp([
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u),
+      data: { id: 'c1', type: 'dm' } },
+  ]);
+  const delivered = [];
+  const notices = [];
+  const inbound = { deliver: async (msg) => { delivered.push(msg); return { ok: true }; } };
+  const org = baseOrg({ access: { dmPolicy: 'open' } });
+  const { bridge } = makeBridge({
+    http, orgConfigs: [org], inbound,
+    callbacks: { onSystemNotice: (o, ev) => notices.push(ev) },
+  });
+  await bridge.start();
+
+  bridge.injectFrame('o1', {
+    type: 'system',
+    payload: { event: 'message.recalled', conversation_id: 'c1', data: { message_id: 'm1', recalled_by: 'u1' } },
+  });
+  await flush();
+
+  assert.equal(delivered.length, 0, 'system notices do not go through InboundDelivery');
+  assert.equal(notices.length, 1, 'onSystemNotice fired');
+  assert.equal(notices[0].kind, 'recall');
+  assert.equal(notices[0].conversationId, 'c1');
+  assert.equal(notices[0].messageId, 'm1');
+
+  await bridge.stop();
+});
+
+test('config-update frame is handed to onConfigEvent (SDK does not persist)', async () => {
+  const { http } = makeHttp([]);
+  const inbound = { deliver: async () => ({ ok: true }) };
+  const events = [];
+  const { bridge } = makeBridge({
+    http, orgConfigs: [baseOrg()], inbound,
+    callbacks: { onConfigEvent: (o, ev) => events.push(ev) },
+  });
+  await bridge.start();
+
+  bridge.injectFrame('o1', {
+    type: 'system',
+    payload: { event: 'agent.config.dm_policy_changed', data: { agent_member_id: 'self1', policy: 'allowlist' } },
+  });
+  await flush();
+
+  assert.equal(events.length, 1, 'onConfigEvent fired');
+  assert.equal(events[0].event, 'agent.config.dm_policy_changed');
+  assert.equal(events[0].data.policy, 'allowlist');
+
+  await bridge.stop();
+});
