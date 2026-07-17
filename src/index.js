@@ -6,10 +6,15 @@
  */
 export * from './providers.js';
 
+// ── transport layer (Phase A · milestone 1) ─────────────────────────────────
+// WS client (keepalive-ping + frame-watchdog + backoff reconnect), HTTP client,
+// token manager, and Cloudflare-Access headers.
+export * from './transport/ws.js';          // WsClient, createDeduper
+export * from './transport/http.js';         // CwsHttpClient
+export * from './transport/token.js';        // TokenManager
+export * from './transport/cf-access.js';    // cfAccessHeaders
+
 // Extraction roadmap (uncomment as each tranche lands):
-// export * from './transport/ws.js';
-// export * from './transport/http.js';
-// export * from './transport/token.js';
 // export * from './protocol/message-codec.js';
 // export * from './sync/sync-engine.js';
 // export * from './services/index.js';
