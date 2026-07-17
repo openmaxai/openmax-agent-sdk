@@ -2,7 +2,7 @@
 
 CWS agent runtime SDK — the **cws-comm protocol layer** extracted from `zylos-openmax`, so a **Node.js** agent runtime (Claude Code, Codex, OpenClaw) can connect to COCO Workspace without depending on Zylos internals.
 
-> **Scope of this package.** This is a **Node.js / ESM** SDK. It serves Node runtimes and their thin Node adapters — it is **not** the cross-language protocol contract. A non-Node runtime (e.g. a Python/Hermes SDK) does **not** consume this package; it re-implements the same wire protocol against the *canonical, language-neutral contract* described in [`CONTRACT.md`](./CONTRACT.md). Treat the JS types/shapes here as one conformant implementation, not as the source of truth for other languages.
+> **Scope of this package.** This is a **Node.js / ESM** SDK. It serves Node runtimes and their thin Node adapters — it is **not** the cross-language protocol contract. A non-Node runtime (e.g. a Python/Hermes SDK) does **not** consume this package; it re-implements the same wire protocol against the *canonical, language-neutral contract* in [`schemas/v1/`](./schemas/v1) + [`fixtures/v1/`](./fixtures/v1) (see [`CONTRACT.md`](./CONTRACT.md)). Treat the JS types/shapes here as one conformant implementation, not as the source of truth for other languages.
 
 > Design: `协议归协议、runtime 归 runtime`. This package is **Layer 1** (shared protocol) *for Node*. Runtime-specific bridging lives in thin **Layer 2** adapter repos (`*-openmax`) that import this SDK. Mirrors the `@coco-xyz/hxa-connect-sdk` + adapter precedent.
 
@@ -62,6 +62,21 @@ await bridge.stop();          // disarm all timers, close every WS + ledger, no 
 
 **Still adapter-owned** (behind `InboundDelivery` / callbacks): C4 forwarding + `formatInboundForC4` + work-reference formatting, media download, group-history/context assembly, quoted-message expansion, receive-reactions/typing, `config.json` persistence, pm2 channel install/liveness, auto-upgrade, the argv CLI shells, and dashboard/api-key provisioning. The `orchestrator.js` header block enumerates the full contract.
 
+## Protocol contract (canonical, language-neutral)
+
+The **source of truth** for the wire protocol is not this JS code — it is the
+versioned, language-neutral contract that ships alongside it:
+
+- **[`schemas/v1/`](./schemas/v1)** — JSON Schema (draft 2020-12) for each protocol surface: `frame`, `inbound-message`, `wake-request`, `wake-result`, `failure-class`, plus the `auth-lifecycle.md` state machine. Each schema is `$id`- and `version`-tagged.
+- **[`fixtures/v1/`](./fixtures/v1)** — shared golden `{input, expected}` fixtures (frame/system-event classification, normalized inbound messages, wake req/result). **Passing this corpus is the definition of "protocol-conformant" in any language.**
+
+This JS SDK is *one conformant implementation*. `test/contract.test.js` feeds the
+fixtures through the real SDK (`classifyFrame` / `classifySystemEvent` / the full
+`CwsAgentBridge` inbound pipeline) and validates the output against the schemas —
+so any drift between the code and the contract fails the build. A future
+Python/Hermes SDK runs the identical fixtures against the identical schemas. See
+[`CONTRACT.md`](./CONTRACT.md) for the full contract and its flagged looseness.
+
 ## Language
 
 Plain **JavaScript / ESM**, no build step (matches `zylos-openmax`; owner decision 2026-07-17 — TS and JS are runtime-identical). Optional hand-written `types/*.d.ts` may be added later for consumer type hints without adopting a TS build.
@@ -70,4 +85,4 @@ This package targets **Node.js only** (see `engines.node >= 20`). It is not publ
 
 ## Status
 
-`0.1.0-alpha.0` — **Phase A extraction complete**: transport, protocol, sync, services (tm/kb/as/comm/core/conn), reporters (agent-level), identity, and the `CwsAgentBridge` orchestrator — **244 tests, 0 coupling to Zylos internals**. Next: Phase B — refactor `zylos-openmax` to consume this SDK, then int→prod parity verification (WS keepalive/watchdog focus). See the design doc for the full module map, cut line, wake contract, and migration phasing.
+`0.1.0-alpha.0` — **Phase A extraction complete**: transport, protocol, sync, services (tm/kb/as/comm/core/conn), reporters (agent-level), identity, and the `CwsAgentBridge` orchestrator, plus the **canonical `schemas/v1/` + `fixtures/v1/` protocol contract** with a self-verifying conformance test — **261 tests, 0 coupling to Zylos internals**. Next: Phase B — refactor `zylos-openmax` to consume this SDK, then int→prod parity verification (WS keepalive/watchdog focus). See the design doc for the full module map, cut line, wake contract, and migration phasing.

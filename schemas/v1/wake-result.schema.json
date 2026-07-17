@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.openmax.ai/cws/v1/wake-result.schema.json",
+  "version": "1.0.0",
+  "title": "WakeResult / InboundDelivery.deliver result",
+  "description": "The result of InboundDelivery.deliver(...) — for Cat.B, the /wake response. CORE INVARIANT: ok:true MUST mean the message genuinely entered the runtime's visible context. A false ok:true loses the message, because the SDK then commits the dedupe/ledger/sync markers and stops retry compensation. On ok:false (or a thrown deliver()) the SDK holds all markers and redelivers on the next /sync sweep.",
+  "oneOf": [
+    {
+      "title": "Success",
+      "type": "object",
+      "required": ["ok"],
+      "properties": {
+        "ok": { "const": true },
+        "runtimeSession": {
+          "type": "string",
+          "description": "Optional identifier of the runtime session the message landed in."
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "title": "Failure",
+      "type": "object",
+      "required": ["ok", "failureClass"],
+      "properties": {
+        "ok": { "const": false },
+        "failureClass": { "$ref": "https://schemas.openmax.ai/cws/v1/failure-class.schema.json" },
+        "retryAfterMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Optional backoff hint (ms) before the message should be retried."
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

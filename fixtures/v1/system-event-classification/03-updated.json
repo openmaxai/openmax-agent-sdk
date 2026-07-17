@@ -1,0 +1,1 @@
+{ "description": "message.updated -> edit (cws-comm names edit 'updated')", "input": "message.updated", "expected": "edit" }

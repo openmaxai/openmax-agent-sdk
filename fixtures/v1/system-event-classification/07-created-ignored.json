@@ -1,0 +1,1 @@
+{ "description": "message.created is ignored -> null", "input": "message.created", "expected": null }

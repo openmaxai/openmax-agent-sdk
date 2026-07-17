@@ -1,0 +1,5 @@
+{
+  "description": "A JSON ping frame classifies as 'heartbeat' (transport auto-replies with pong).",
+  "input": { "type": "ping" },
+  "expected": "heartbeat"
+}

@@ -1,0 +1,28 @@
+{
+  "description": "A DM from the bound owner under dmPolicy=owner passes as dm:owner-exempt; because owner.name is unset the decision carries an ownerNameHint from the sender display name.",
+  "org": {
+    "slug": "o1",
+    "org_id": "org1",
+    "org_name": "Org One",
+    "self": { "member_id": "self1", "display_name": "Bot" },
+    "owner": { "member_id": "u1" },
+    "access": { "dmPolicy": "owner" }
+  },
+  "frame": { "type": "message", "payload": { "id": "m2", "conversation_id": "c1", "sender_id": "u1" } },
+  "detail": {
+    "id": "m2", "sender_id": "u1", "sender_type": "HUMAN", "sender_display_name": "Alice", "seq": 8, "type": "TEXT", "inbox_seq": 8,
+    "content": { "content_type": "text", "body": { "text": "hi bot" }, "attachments": [] }
+  },
+  "conversation": { "id": "c1", "type": "dm" },
+  "expected": {
+    "conversationType": "dm",
+    "messageId": "m2",
+    "senderId": "u1",
+    "senderDisplayName": "Alice",
+    "text": "hi bot",
+    "endpoint": "c1",
+    "via": "ws",
+    "decisionReasonIncludes": "dm:owner-exempt",
+    "decisionOwnerNameHint": "Alice"
+  }
+}

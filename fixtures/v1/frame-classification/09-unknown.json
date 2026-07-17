@@ -1,0 +1,5 @@
+{
+  "description": "An unrecognized frame type classifies as 'unknown' (warned, dropped).",
+  "input": { "type": "some_future_frame", "payload": {} },
+  "expected": "unknown"
+}

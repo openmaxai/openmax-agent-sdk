@@ -1,0 +1,5 @@
+{
+  "description": "An error frame classifies as 'error'.",
+  "input": { "type": "error", "payload": { "code": "bad_request", "message": "nope" } },
+  "expected": "error"
+}

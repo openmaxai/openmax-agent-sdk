@@ -10,6 +10,8 @@
   "files": [
     "src",
     "types",
+    "schemas",
+    "fixtures",
     "README.md",
     "CONTRACT.md",
     "!src/**/*.test.js",
@@ -36,5 +38,8 @@
     "type": "git",
     "url": "git+https://github.com/openmaxai/openmax-agent-sdk.git"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "ajv": "^8.20.0"
+  }
 }

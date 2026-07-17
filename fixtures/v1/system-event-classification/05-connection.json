@@ -1,0 +1,1 @@
+{ "description": "connection.* -> connection", "input": "connection.authorized", "expected": "connection" }

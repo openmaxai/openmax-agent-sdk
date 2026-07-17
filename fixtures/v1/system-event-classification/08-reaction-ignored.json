@@ -1,0 +1,1 @@
+{ "description": "message.reaction.added is ignored -> null", "input": "message.reaction.added", "expected": null }

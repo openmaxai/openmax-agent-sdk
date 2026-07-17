@@ -1,0 +1,1 @@
+{ "description": "agent.config.* -> config_update", "input": "agent.config.dm_policy_changed", "expected": "config_update" }

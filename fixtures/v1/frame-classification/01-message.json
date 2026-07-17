@@ -1,0 +1,5 @@
+{
+  "description": "A message frame classifies as FrameKind 'message'.",
+  "input": { "type": "message", "payload": { "id": "m1", "conversation_id": "c1", "sender_id": "u1" } },
+  "expected": "message"
+}

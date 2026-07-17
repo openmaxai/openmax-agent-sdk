@@ -1,0 +1,5 @@
+{
+  "description": "A JSON pong frame classifies as 'heartbeat'.",
+  "input": { "type": "pong", "timestamp": 1700000000000 },
+  "expected": "heartbeat"
+}

@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.openmax.ai/cws/v1/inbound-message.schema.json",
+  "version": "1.0.0",
+  "title": "Normalized InboundMessage",
+  "description": "The normalized, runtime-agnostic message the orchestrator (orchestrator.js #buildInbound) hands to InboundDelivery.deliver(msg, endpoint, priority) AFTER dedupe -> detail-fetch -> field-hoist -> conversation-fetch -> access-policy. `endpoint` and `priority` are also passed as separate positional args but are mirrored here. `additionalProperties:false` is deliberate: it makes this schema a drift alarm — if the SDK starts emitting a new top-level field it must be added here first.",
+  "type": "object",
+  "required": [
+    "orgId",
+    "orgSlug",
+    "conversation",
+    "conversationId",
+    "conversationType",
+    "messageId",
+    "senderId",
+    "senderType",
+    "senderDisplayName",
+    "type",
+    "text",
+    "attachments",
+    "parentMessageId",
+    "threadId",
+    "endpoint",
+    "via",
+    "decision",
+    "message"
+  ],
+  "properties": {
+    "orgId": { "type": "string", "description": "orgConfig.org_id" },
+    "orgSlug": { "type": "string", "description": "orgConfig.slug" },
+    "orgName": { "type": "string", "description": "orgConfig.org_name (omitted when the config has none)." },
+    "conversation": {
+      "type": "object",
+      "description": "The resolved conversation record ({id, type, name, ...}) or a minimal {id} fallback when the fetch failed.",
+      "required": ["id"],
+      "additionalProperties": true
+    },
+    "conversationId": { "type": "string" },
+    "conversationType": {
+      "type": "string",
+      "description": "Lowercased conv.type, else derived ('thread' if thread_id present, else 'dm'). Known values: dm | group | thread. Kept as a free string because the value is server-driven (conv.type)."
+    },
+    "messageId": { "type": "string" },
+    "seq": { "type": "integer", "description": "Conversation sequence number (omitted when the message carries none)." },
+    "senderId": { "type": "string" },
+    "senderType": { "type": "string", "description": "HUMAN | AGENT | SYSTEM. May be '' when the frame/detail omit it." },
+    "senderDisplayName": { "type": "string" },
+    "type": { "type": "string", "description": "Lowercased message content type (e.g. 'text'). May be '' when absent." },
+    "text": { "type": "string", "description": "Extracted body text (content.body.text | string content), '' when none." },
+    "attachments": {
+      "type": "array",
+      "description": "content.attachments (raw pass-through), [] when none.",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "parentMessageId": {
+      "type": ["string", "null"],
+      "description": "parent_id | message.parent_id | parent_message_id, or null."
+    },
+    "threadId": { "type": ["string", "null"], "description": "thread_id or null." },
+    "endpoint": {
+      "type": "string",
+      "description": "formatEndpoint() routing key: <conversationId>[|reply:..][|thread:..][|parent:..]. Also passed as the 2nd positional arg to deliver()."
+    },
+    "priority": {
+      "$ref": "#/$defs/Priority",
+      "description": "systemEventPriority(msg): 1|2|3, or omitted (undefined) when the message carries no metadata.systemEvent. Also passed as the 3rd positional arg to deliver()."
+    },
+    "via": {
+      "type": "string",
+      "enum": ["ws", "sync"],
+      "description": "Arrival path: live WS frame ('ws') or /sync catch-up ('sync')."
+    },
+    "decision": { "$ref": "#/$defs/Decision" },
+    "message": {
+      "type": "object",
+      "description": "The full merged raw frame+detail (notification spread over fetched detail). Opaque pass-through so the adapter can do media/history/quoted-message/C4-envelope work without re-fetching.",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Priority": {
+      "title": "DeliveryPriority",
+      "description": "Neutral 1=urgent / 2=high / 3=normal scale (protocol/system-message.js). Adapters map it to their own delivery-priority mechanism.",
+      "type": "integer",
+      "enum": [1, 2, 3]
+    },
+    "Decision": {
+      "title": "AccessDecision (handle:true form)",
+      "description": "The access-policy decision (protocol/access-policy.js decideInbound). Only the handle:true variant reaches a delivered InboundMessage — drops (handle:false) never call deliver(). Extra hint fields (bindOwnerHint / ownerNameHint / mode / mentioned / groupCfg) appear depending on the branch.",
+      "type": "object",
+      "required": ["handle", "reason"],
+      "properties": {
+        "handle": { "const": true },
+        "reason": { "type": "string" },
+        "mode": { "type": "string", "enum": ["smart", "mention", "silent"], "description": "Group mode (group/thread branch only)." },
+        "mentioned": { "type": "boolean" },
+        "groupCfg": { "type": ["object", "null"], "additionalProperties": true },
+        "ownerNameHint": { "type": "string", "description": "Owner display name to persist (DM owner-exempt first-name-fill)." },
+        "bindOwnerHint": {
+          "type": "object",
+          "description": "First-DM owner auto-bind hint.",
+          "required": ["memberId"],
+          "properties": {
+            "memberId": { "type": "string" },
+            "displayName": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
