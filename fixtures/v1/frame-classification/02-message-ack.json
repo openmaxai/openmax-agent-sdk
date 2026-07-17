@@ -1,0 +1,5 @@
+{
+  "description": "A message_ack frame classifies as 'message_ack'.",
+  "input": { "type": "message_ack", "payload": { "seq": 12, "message_id": "m1" } },
+  "expected": "message_ack"
+}

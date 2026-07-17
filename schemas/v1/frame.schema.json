@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.openmax.ai/cws/v1/frame.schema.json",
+  "version": "1.0.0",
+  "title": "CWS inbound WS frame",
+  "description": "Top-level cws-comm WebSocket frame as received by the SDK. The transport layer (transport/ws.js) parses raw text into this JSON object and hands it to createFrameDispatcher (protocol/frame-dispatch.js). Frames are permissive by design: a frame with an unrecognized `type` classifies as FrameKind `unknown` and is dropped, so this schema intentionally allows additional top-level and payload properties. `payload` for a `message` frame may either carry the message notification fields directly or nest them one level deeper under `payload.payload` (the orchestrator reads `payload?.payload || payload`).",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "$ref": "#/$defs/FrameType",
+      "description": "Wire-level frame type. Drives classifyFrame() -> FrameKind."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Type-specific body. Shape depends on `type`; see the $defs payload shapes.",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "FrameKind": {
+      "title": "FrameKind",
+      "description": "Classification bucket returned by classifyFrame() (protocol/frame-dispatch.js FRAME_KIND). This is the SDK-neutral kind, NOT the wire `type`.",
+      "type": "string",
+      "enum": [
+        "message",
+        "message_ack",
+        "system",
+        "error",
+        "heartbeat",
+        "presence",
+        "unknown"
+      ]
+    },
+    "FrameType": {
+      "title": "FrameType",
+      "description": "Known wire `type` values. `message`->message, `message_ack`->message_ack, `system`->system, `error`->error, `ping`/`pong`->heartbeat, `typing`/`presence`/`read_receipt`/`read_state_update`->presence. Any other string is allowed on the wire and classifies as `unknown`.",
+      "type": "string"
+    },
+    "MessageNotification": {
+      "title": "MessageNotification",
+      "description": "The `payload` of a `message` frame (or the object nested under payload.payload for /sync catch-up envelopes). Only id + conversation_id are required for the orchestrator to proceed; the rest are hoisted/merged with the fetched message detail. `_via` is an SDK-internal arrival-path marker ('sync' for /sync catch-up).",
+      "type": "object",
+      "required": ["id", "conversation_id"],
+      "properties": {
+        "id": { "type": "string", "description": "Message id (dedupe key)." },
+        "conversation_id": { "type": "string" },
+        "sender_id": { "type": "string" },
+        "sender_type": { "type": "string", "description": "HUMAN | AGENT | SYSTEM (case-insensitive on read)." },
+        "seq": { "type": "integer", "description": "Conversation sequence number." },
+        "type": { "type": "string", "description": "Message content type (e.g. TEXT)." },
+        "thread_id": { "type": "string" },
+        "parent_message_id": { "type": "string" },
+        "_via": { "type": "string", "enum": ["ws", "sync"], "description": "SDK-internal: arrival path." }
+      },
+      "additionalProperties": true
+    },
+    "MessageAckPayload": {
+      "title": "MessageAckPayload",
+      "description": "The `payload` of a `message_ack` frame (server ack of an outbound send).",
+      "type": "object",
+      "properties": {
+        "seq": { "type": "integer" },
+        "message_id": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "SystemPayload": {
+      "title": "SystemPayload",
+      "description": "The `payload` of a `system` frame. `event` is a cws-comm domain event name (classifySystemEvent maps it to recall/edit/config_update/connection/channel/null). `data` carries event-specific fields (message_id/id/msg_id, recalled_by/edited_by/sender_id, conversation_id, agent_member_id, sender_type).",
+      "type": "object",
+      "required": ["event"],
+      "properties": {
+        "event": { "type": "string" },
+        "conversation_id": { "type": "string" },
+        "data": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
+    }
+  }
+}

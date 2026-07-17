@@ -1,0 +1,5 @@
+{
+  "description": "A read_state_update frame classifies as 'presence'.",
+  "input": { "type": "read_state_update", "payload": { "conversation_id": "c1", "read_until_seq": 9 } },
+  "expected": "presence"
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.openmax.ai/cws/v1/wake-request.schema.json",
+  "version": "1.0.0",
+  "title": "WakeRequest (raft-channel-wake.v1)",
+  "description": "The request body a Cat.B runtime adapter POSTs to /wake to bring an inbound CWS message into a bare runtime's visible context. This is the wire form of the fields the SDK-normalized InboundMessage carries; the adapter derives it from that message. `contentPreview` is a short, non-authoritative snippet for the wake notification — the runtime fetches full content via the SDK/services once awake. `senderId` is OPTIONAL: it mirrors the InboundMessage, where the SDK still delivers a message whose sender could not be resolved (see inbound-message.schema.json), so a conformant Cat.B adapter can express that same sender-less message. The SDK itself does not build this body (Cat.B delivery is adapter-owned behind InboundDelivery.deliver); this schema pins the contract both sides must agree on.",
+  "type": "object",
+  "required": ["schema", "messageId", "conversationId", "contentPreview"],
+  "properties": {
+    "schema": {
+      "const": "raft-channel-wake.v1",
+      "description": "Contract discriminator/version tag."
+    },
+    "messageId": { "type": "string", "description": "InboundMessage.messageId." },
+    "conversationId": { "type": "string", "description": "InboundMessage.conversationId." },
+    "senderId": { "type": "string", "description": "InboundMessage.senderId. OPTIONAL — absent when the SDK could not resolve the sender (consistent with the optional senderId on inbound-message)." },
+    "contentPreview": { "type": "string", "description": "Short preview of InboundMessage.text (non-authoritative)." }
+  },
+  "additionalProperties": false
+}

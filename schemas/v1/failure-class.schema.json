@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.openmax.ai/cws/v1/failure-class.schema.json",
+  "version": "1.0.0",
+  "title": "FailureClass",
+  "description": "Enumerated failure classes carried on an unsuccessful delivery ({ok:false, failureClass}) — the wake-result / InboundDelivery.deliver failure result. RETRY SEMANTICS: any {ok:false} (regardless of class) holds the dedupe/ledger/sync-cursor markers and the message is redelivered on the next /sync sweep; `retryAfterMs` (see wake-result) is an optional backoff hint. The class is diagnostic, not routing. NOTE ON LOOSENESS: the JS SDK treats failureClass as an OPEN string — the orchestrator logs and re-throws whatever the adapter returns and only the SDK's own default delivery emits a fixed value. This enum captures the classes actually present in the codebase and designates them canonical; adding a new class is a contract revision, not an ad-hoc string.",
+  "type": "string",
+  "enum": [
+    "no_inbound_provider",
+    "wake_failed"
+  ],
+  "$comment": "Sources in code: 'no_inbound_provider' — providers.js resolveProviders() default inbound.deliver (no adapter InboundDelivery supplied). 'wake_failed' — the raft-channel-wake.v1 Cat.B delivery failure (a failed POST /wake), used in orchestrator.test.js as the representative adapter failure class."
+}

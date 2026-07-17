@@ -1,0 +1,27 @@
+{
+  "description": "A message arriving via /sync catch-up carries via='sync' (from the notification _via marker) and hoists seq; otherwise it normalizes identically to a live frame.",
+  "org": {
+    "slug": "o1",
+    "org_id": "org1",
+    "org_name": "Org One",
+    "self": { "member_id": "self1", "display_name": "Bot" },
+    "owner": { "member_id": "owner1", "name": "Owner" },
+    "access": { "dmPolicy": "open" }
+  },
+  "frame": { "type": "message", "payload": { "id": "m9", "conversation_id": "c1", "sender_id": "u1", "seq": 6, "_via": "sync" } },
+  "detail": {
+    "id": "m9", "sender_id": "u1", "sender_type": "HUMAN", "seq": 6, "type": "TEXT", "inbox_seq": 6,
+    "content": { "content_type": "text", "body": { "text": "missed" }, "attachments": [] }
+  },
+  "conversation": { "id": "c1", "type": "dm" },
+  "expected": {
+    "conversationId": "c1",
+    "conversationType": "dm",
+    "messageId": "m9",
+    "seq": 6,
+    "text": "missed",
+    "endpoint": "c1",
+    "via": "sync",
+    "decisionReasonIncludes": "dm:open"
+  }
+}

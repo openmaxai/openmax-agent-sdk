@@ -1,0 +1,5 @@
+{
+  "description": "A system frame classifies as 'system'.",
+  "input": { "type": "system", "payload": { "event": "message.recalled", "conversation_id": "c1", "data": { "message_id": "m1", "recalled_by": "u1" } } },
+  "expected": "system"
+}

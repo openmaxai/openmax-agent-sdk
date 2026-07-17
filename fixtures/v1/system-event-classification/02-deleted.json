@@ -1,0 +1,1 @@
+{ "description": "message.deleted -> recall", "input": "message.deleted", "expected": "recall" }

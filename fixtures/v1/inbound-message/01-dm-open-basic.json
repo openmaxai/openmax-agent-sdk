@@ -1,0 +1,32 @@
+{
+  "description": "A DM under dmPolicy=open normalizes to InboundMessage with text hoisted from the fetched detail, endpoint = conversationId, decision dm:open.",
+  "org": {
+    "slug": "o1",
+    "org_id": "org1",
+    "org_name": "Org One",
+    "self": { "member_id": "self1", "display_name": "Bot" },
+    "owner": { "member_id": "owner1", "name": "Owner" },
+    "access": { "dmPolicy": "open" }
+  },
+  "frame": { "type": "message", "payload": { "id": "m1", "conversation_id": "c1", "sender_id": "u1" } },
+  "detail": {
+    "id": "m1", "sender_id": "u1", "sender_type": "HUMAN", "seq": 7, "type": "TEXT", "inbox_seq": 7,
+    "content": { "content_type": "text", "body": { "text": "hello" }, "attachments": [] }
+  },
+  "conversation": { "id": "c1", "type": "dm", "name": "DM" },
+  "expected": {
+    "orgId": "org1",
+    "orgSlug": "o1",
+    "conversationId": "c1",
+    "conversationType": "dm",
+    "messageId": "m1",
+    "senderId": "u1",
+    "senderType": "HUMAN",
+    "type": "text",
+    "text": "hello",
+    "attachments": [],
+    "endpoint": "c1",
+    "via": "ws",
+    "decisionReasonIncludes": "dm:open"
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "name": "@coco-xyz/cws-agent-sdk",
+  "name": "@openmaxai/openmax-agent-sdk",
   "version": "0.1.0-alpha.0",
   "description": "CWS agent runtime SDK — cws-comm protocol layer (WS/auth/heartbeat/reconnect, sync, message codec, tm/kb/as/comm/core/conn service clients) extracted from zylos-openmax; consumed by runtime adapters.",
   "type": "module",
@@ -10,7 +10,12 @@
   "files": [
     "src",
     "types",
-    "README.md"
+    "schemas",
+    "fixtures",
+    "README.md",
+    "CONTRACT.md",
+    "!src/**/*.test.js",
+    "!src/**/_fixtures.js"
   ],
   "scripts": {
     "test": "node --test",
@@ -31,7 +36,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/openmaxai/cws-agent-sdk.git"
+    "url": "git+https://github.com/openmaxai/openmax-agent-sdk.git"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "ajv": "^8.20.0"
+  }
 }

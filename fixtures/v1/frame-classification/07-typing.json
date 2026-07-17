@@ -1,0 +1,5 @@
+{
+  "description": "A typing frame classifies as 'presence' (acknowledged and dropped).",
+  "input": { "type": "typing", "payload": { "conversation_id": "c1", "sender_id": "u1" } },
+  "expected": "presence"
+}
