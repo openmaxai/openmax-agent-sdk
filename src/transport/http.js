@@ -92,36 +92,38 @@ function safeOrigin(u) {
 }
 const MAX_REDIRECT_HOPS = 5;
 
-// Drop Content-Type / Content-Length (case-insensitively) from a headers object.
-// Used when a redirect turns a body-carrying request into a bodyless GET, so the
-// followed request does not advertise a body it no longer sends — matching what
-// native fetch does on a method-downgrading redirect.
+// The full request-body header set, dropped when a redirect downgrades a
+// body-carrying request to a bodyless GET (matches the Fetch spec, which strips
+// the request-body-header name set — not just content-type/length).
+const REQUEST_BODY_HEADERS = new Set([
+  'content-encoding', 'content-language', 'content-location',
+  'content-type', 'content-length',
+]);
 function stripBodyHeaders(headers) {
   if (!headers || typeof headers !== 'object') return headers;
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
-    const lk = k.toLowerCase();
-    if (lk === 'content-type' || lk === 'content-length') continue;
+    if (REQUEST_BODY_HEADERS.has(k.toLowerCase())) continue;
     out[k] = v;
   }
   return out;
 }
 
 // Rewrite the fetch init for a FOLLOWED redirect so method/body match native
-// fetch's redirect semantics (P2-b). Native fetch, on a followed redirect:
-//   - 303                      → GET, drop body (any original method)
-//   - 301/302 on non-GET/HEAD  → GET, drop body (a POST is downgraded to GET)
-//   - 307/308                  → preserve method + body + headers
-//   - GET/HEAD                 → unchanged
-// This keeps a same-origin/trusted follow behaviorally identical to a native
-// fetch auto-follow, so REST/token endpoints that legitimately 301/302 a POST
-// are not re-POSTed with a stale body.
+// fetch's redirect semantics (per WHATWG Fetch "HTTP-redirect fetch"):
+//   - 301/302 → downgrade to GET + drop body ONLY when the method is POST;
+//               every other method (PUT/DELETE/PATCH/...) keeps method + body.
+//   - 303     → GET + drop body for any method except GET/HEAD.
+//   - 307/308 → preserve method + body + headers.
+//   - GET/HEAD → unchanged.
+// Over-downgrading (e.g. a PUT upload → bodyless GET) would silently drop the
+// payload and can even report false success, so the POST-only rule matters.
 function rewriteInitForRedirect(init, status) {
   const method = String(init.method || 'GET').toUpperCase();
   const isGetOrHead = method === 'GET' || method === 'HEAD';
-  const downgradeToGet = status === 303
-    || ((status === 301 || status === 302) && !isGetOrHead);
-  if (!downgradeToGet) return init;   // 307/308 preserve; GET/HEAD unchanged
+  const downgradeToGet = (status === 303 && !isGetOrHead)
+    || ((status === 301 || status === 302) && method === 'POST');
+  if (!downgradeToGet) return init;   // 307/308 preserve; non-POST 301/302 preserve; GET/HEAD unchanged
   return { ...init, method: 'GET', body: undefined, headers: stripBodyHeaders(init.headers) };
 }
 

@@ -341,3 +341,52 @@ test('P2-b: a same-origin 303 downgrades any method to a bodyless GET (fetch par
   assert.equal(fetch.calls[1].opts.body, undefined, 'the body is dropped on a 303');
   assert.equal(fetch.calls[1].opts.headers['Content-Type'], undefined, 'content-type dropped');
 });
+
+// ── round-4: 301/302 downgrade to GET is POST-ONLY; a PUT upload must keep PUT ──
+// The round-3 fix over-applied POST->GET to ALL non-GET/HEAD methods, so a PUT
+// upload that hit a 302 became a bodyless GET — the object was never uploaded
+// yet putBytes still returned {ok:true} (false success). Fetch only downgrades
+// POST on 301/302; PUT/DELETE/... keep method + body.
+test('round-4: a same-origin 302 on a PUT preserves PUT + body (no false-success upload)', async () => {
+  const fetch = redirectFetch([
+    { status: 302, location: 'https://api.cws.test/artifacts/upload/final' },
+    { status: 200, text: '' },
+  ]);
+  const c = cfClient({ fetch });
+  const res = await c.putBytes('https://api.cws.test/artifacts/upload', Buffer.from('PAYLOAD'), 'image/png');
+  assert.equal(fetch.calls.length, 2, 'the redirect was followed');
+  assert.equal(fetch.calls[1].opts.method, 'PUT', '302 on a PUT preserves PUT (NOT downgraded to GET)');
+  assert.ok(fetch.calls[1].opts.body, 'the PUT body survives the followed hop (real upload, not bodyless GET)');
+  assert.equal(fetch.calls[1].opts.headers['Content-Type'], 'image/png', 'content-type preserved on the PUT');
+  assert.equal(res.ok, true);
+});
+
+test('round-4: a same-origin 301 on a PUT preserves PUT + body', async () => {
+  const fetch = redirectFetch([
+    { status: 301, location: 'https://api.cws.test/artifacts/upload/final' },
+    { status: 200, text: '' },
+  ]);
+  const c = cfClient({ fetch });
+  await c.putBytes('https://api.cws.test/artifacts/upload', Buffer.from('P'), 'image/png');
+  assert.equal(fetch.calls[1].opts.method, 'PUT', '301 on a PUT preserves PUT');
+  assert.ok(fetch.calls[1].opts.body, 'body preserved on 301');
+});
+
+// A downgrade-to-GET must strip the FULL request-body header set, not just
+// content-type/length (round-3 left content-encoding/language/location behind).
+test('round-4: a downgrade-to-GET strips the full request-body header set', async () => {
+  const fetch = redirectFetch([
+    { status: 303, location: 'https://api.cws.test/artifacts/result' },
+    { status: 200, text: '' },
+  ]);
+  const c = cfClient({ fetch });
+  await c.putBytes('https://api.cws.test/artifacts/upload', Buffer.from('x'), 'image/png',
+    { 'Content-Encoding': 'gzip', 'Content-Language': 'en', 'Content-Location': '/x', 'X-Keep': '1' });
+  const h2 = fetch.calls[1].opts.headers;
+  assert.equal(fetch.calls[1].opts.method, 'GET', '303 → GET for any non-GET/HEAD');
+  assert.equal(h2['Content-Type'], undefined, 'content-type stripped');
+  assert.equal(h2['Content-Encoding'], undefined, 'content-encoding stripped');
+  assert.equal(h2['Content-Language'], undefined, 'content-language stripped');
+  assert.equal(h2['Content-Location'], undefined, 'content-location stripped');
+  assert.equal(h2['X-Keep'], '1', 'non-body headers are preserved');
+});

@@ -72,30 +72,34 @@ function safeOrigin(u) {
 }
 const MAX_REDIRECT_HOPS = 5;
 
-// Drop Content-Type / Content-Length (case-insensitively) — used when a redirect
-// downgrades a body-carrying request to a bodyless GET (matches native fetch).
+// The full request-body header set, dropped when a redirect downgrades a
+// body-carrying request to a bodyless GET (matches the Fetch spec).
+const REQUEST_BODY_HEADERS = new Set([
+  'content-encoding', 'content-language', 'content-location',
+  'content-type', 'content-length',
+]);
 function stripBodyHeaders(headers) {
   if (!headers || typeof headers !== 'object') return headers;
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
-    const lk = k.toLowerCase();
-    if (lk === 'content-type' || lk === 'content-length') continue;
+    if (REQUEST_BODY_HEADERS.has(k.toLowerCase())) continue;
     out[k] = v;
   }
   return out;
 }
 
 // Rewrite the fetch init for a FOLLOWED redirect to match native fetch's
-// method/body semantics (P2-b): 303 and 301/302-on-POST → bodyless GET;
-// 307/308 preserve method + body + headers; GET/HEAD unchanged. Token requests
-// are POSTs, so a same-origin 301/302 must downgrade to GET (a re-POST with the
-// stale JSON body would break a core auth endpoint that legitimately redirects).
+// method/body semantics (per WHATWG Fetch): 301/302 downgrade to GET ONLY for
+// POST; 303 → GET for any non-GET/HEAD; 307/308 preserve method+body; GET/HEAD
+// unchanged. Token requests are POSTs, so a same-origin 301/302 downgrades to
+// GET (a re-POST with the stale JSON body would break a core auth endpoint that
+// legitimately redirects).
 function rewriteInitForRedirect(init, status) {
   const method = String(init.method || 'GET').toUpperCase();
   const isGetOrHead = method === 'GET' || method === 'HEAD';
-  const downgradeToGet = status === 303
-    || ((status === 301 || status === 302) && !isGetOrHead);
-  if (!downgradeToGet) return init;   // 307/308 preserve; GET/HEAD unchanged
+  const downgradeToGet = (status === 303 && !isGetOrHead)
+    || ((status === 301 || status === 302) && method === 'POST');
+  if (!downgradeToGet) return init;   // 307/308 preserve; non-POST 301/302 preserve; GET/HEAD unchanged
   return { ...init, method: 'GET', body: undefined, headers: stripBodyHeaders(init.headers) };
 }
 
