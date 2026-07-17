@@ -146,26 +146,34 @@ export class CwsAgentBridge {
     // ── shared process-wide state ────────────────────────────────────────────
     // One message-id deduper for the whole process (mirrors comm-bridge's single
     // module-level `dedupe`). Persistence, if any, is the adapter's concern; the
-    // default is in-memory count-based retention.
-    this._dedupe = this.callbacks.dedupe || createDeduper({
-      maxEntries: reporters.dedupMaxEntries ?? DEFAULT_DEDUP_MAX_ENTRIES,
-    });
-    // Does the deduper support the ATOMIC reserve()/commit()/release() claim
-    // (P1-A)? The default createDeduper() does. A legacy plain-function
-    // `callbacks.dedupe` (callable, no reserve) does NOT — it can only
-    // check-and-record on peek, which is NOT atomic under concurrency and cannot
-    // release a claim after a failed deliver. We accept it best-effort and warn
-    // loudly so the degraded exactly-once semantics are documented, not silent.
-    this._dedupeAtomic = typeof this._dedupe.reserve === 'function'
-      && typeof this._dedupe.commit === 'function';
-    if (this.callbacks.dedupe && !this._dedupeAtomic) {
-      this.#warn('[dedupe] legacy plain-function callbacks.dedupe supplied: no '
-        + 'atomic reserve()/commit() — falling back to best-effort '
-        + 'check-and-record. DEGRADED semantics: exactly-once is not guaranteed '
-        + 'under concurrent same-id delivery, and a failed/thrown deliver() '
-        + 'cannot release the claim, so a subsequent /sync replay may be '
-        + 'suppressed. Supply a createDeduper()-shaped deduper for atomic '
-        + 'exactly-once.');
+    // default is the built-in ATOMIC in-memory deduper (createDeduper).
+    //
+    // A custom `callbacks.dedupe` MUST implement the full atomic
+    // reserve()/commit()/release() interface (P1). The exactly-once delivery
+    // guarantee depends on it: reserve is a SYNCHRONOUS check-and-claim taken
+    // before the first await, commit finalizes the claim only once the work has
+    // genuinely succeeded, and release frees a FAILED claim so a later /sync
+    // replay can retry. A legacy plain check-and-record function records the id
+    // at reserve time and has no release, so a {ok:false} deliver followed by a
+    // replay is permanently suppressed — the message is lost after ONE attempt.
+    // We therefore REJECT a non-atomic deduper at construction rather than
+    // silently accept it with a degraded warning.
+    if (this.callbacks.dedupe) {
+      const d = this.callbacks.dedupe;
+      const atomic = typeof d.reserve === 'function'
+        && typeof d.commit === 'function'
+        && typeof d.release === 'function';
+      if (!atomic) {
+        throw new Error(
+          'CwsAgentBridge: custom dedupe must implement reserve/commit/release; '
+          + 'pass none to use the built-in atomic deduper',
+        );
+      }
+      this._dedupe = d;
+    } else {
+      this._dedupe = createDeduper({
+        maxEntries: reporters.dedupMaxEntries ?? DEFAULT_DEDUP_MAX_ENTRIES,
+      });
     }
 
     // slug → per-org runtime record ({ orgConfig, sessionRef, ledger, sync, ws,
@@ -219,29 +227,24 @@ export class CwsAgentBridge {
   // under concurrency: two concurrent handlers for the same id — the second
   // reserve() returns false and does NOT deliver again.
   //
-  // The default deduper (createDeduper) exposes atomic reserve/commit/release. A
-  // legacy adapter-supplied plain-function `callbacks.dedupe` has none, so we
-  // degrade to best-effort check-and-record (reserve = the callable's own
-  // check-and-record, commit/release are no-ops) — documented at construction.
+  // The deduper is ALWAYS atomic: the built-in default (createDeduper) exposes
+  // reserve/commit/release, and a custom `callbacks.dedupe` is rejected at
+  // construction unless it implements the same interface (P1). So these helpers
+  // delegate directly — no degraded/legacy fallback path exists.
 
   // RESERVE — returns true if the id was newly claimed (caller owns it and must
   // commit/release), false if it's a committed or in-flight duplicate.
   #dedupeReserve(id) {
     if (!id) return true;
-    if (this._dedupeAtomic) return this._dedupe.reserve(id);
-    // Legacy callable: check-and-record returns true if ALREADY seen (duplicate),
-    // so a `false` result means we just recorded it → newly claimed.
-    return this._dedupe(id) === false;
+    return this._dedupe.reserve(id);
   }
   #dedupeCommit(id) {
     if (!id) return;
-    if (this._dedupeAtomic) this._dedupe.commit(id);
-    // legacy callable already recorded during #dedupeReserve — nothing to do.
+    this._dedupe.commit(id);
   }
   #dedupeRelease(id) {
     if (!id) return;
-    if (this._dedupeAtomic) this._dedupe.release?.(id);
-    // legacy callable cannot un-record — degraded (documented at construction).
+    this._dedupe.release(id);
   }
 
   // ── protocol read helpers (thin http wrappers, cached; port of comm-bridge) ──

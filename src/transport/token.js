@@ -72,6 +72,33 @@ function safeOrigin(u) {
 }
 const MAX_REDIRECT_HOPS = 5;
 
+// Drop Content-Type / Content-Length (case-insensitively) — used when a redirect
+// downgrades a body-carrying request to a bodyless GET (matches native fetch).
+function stripBodyHeaders(headers) {
+  if (!headers || typeof headers !== 'object') return headers;
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    const lk = k.toLowerCase();
+    if (lk === 'content-type' || lk === 'content-length') continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+// Rewrite the fetch init for a FOLLOWED redirect to match native fetch's
+// method/body semantics (P2-b): 303 and 301/302-on-POST → bodyless GET;
+// 307/308 preserve method + body + headers; GET/HEAD unchanged. Token requests
+// are POSTs, so a same-origin 301/302 must downgrade to GET (a re-POST with the
+// stale JSON body would break a core auth endpoint that legitimately redirects).
+function rewriteInitForRedirect(init, status) {
+  const method = String(init.method || 'GET').toUpperCase();
+  const isGetOrHead = method === 'GET' || method === 'HEAD';
+  const downgradeToGet = status === 303
+    || ((status === 301 || status === 302) && !isGetOrHead);
+  if (!downgradeToGet) return init;   // 307/308 preserve; GET/HEAD unchanged
+  return { ...init, method: 'GET', body: undefined, headers: stripBodyHeaders(init.headers) };
+}
+
 // ── RPC logging (env-gated, mirrors the HTTP client) ─────────────────────────
 function rpcLogStdoutEnabled() {
   return process.env.COCO_RPC_LOG !== '0';
@@ -186,7 +213,8 @@ export class TokenManager {
         throw err;
       }
       curUrl = nextUrl;
-      if (res.status === 303) curInit = { ...curInit, method: 'GET', body: undefined };
+      // Match native fetch method/body semantics on the followed hop (P2-b).
+      curInit = rewriteInitForRedirect(curInit, res.status);
     }
   }
 

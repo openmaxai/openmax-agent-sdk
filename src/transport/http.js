@@ -92,6 +92,39 @@ function safeOrigin(u) {
 }
 const MAX_REDIRECT_HOPS = 5;
 
+// Drop Content-Type / Content-Length (case-insensitively) from a headers object.
+// Used when a redirect turns a body-carrying request into a bodyless GET, so the
+// followed request does not advertise a body it no longer sends — matching what
+// native fetch does on a method-downgrading redirect.
+function stripBodyHeaders(headers) {
+  if (!headers || typeof headers !== 'object') return headers;
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    const lk = k.toLowerCase();
+    if (lk === 'content-type' || lk === 'content-length') continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+// Rewrite the fetch init for a FOLLOWED redirect so method/body match native
+// fetch's redirect semantics (P2-b). Native fetch, on a followed redirect:
+//   - 303                      → GET, drop body (any original method)
+//   - 301/302 on non-GET/HEAD  → GET, drop body (a POST is downgraded to GET)
+//   - 307/308                  → preserve method + body + headers
+//   - GET/HEAD                 → unchanged
+// This keeps a same-origin/trusted follow behaviorally identical to a native
+// fetch auto-follow, so REST/token endpoints that legitimately 301/302 a POST
+// are not re-POSTed with a stale body.
+function rewriteInitForRedirect(init, status) {
+  const method = String(init.method || 'GET').toUpperCase();
+  const isGetOrHead = method === 'GET' || method === 'HEAD';
+  const downgradeToGet = status === 303
+    || ((status === 301 || status === 302) && !isGetOrHead);
+  if (!downgradeToGet) return init;   // 307/308 preserve; GET/HEAD unchanged
+  return { ...init, method: 'GET', body: undefined, headers: stripBodyHeaders(init.headers) };
+}
+
 // ── URL building ─────────────────────────────────────────────────────────────
 function buildUrl(baseUrl, path, query) {
   const base = (baseUrl || '').replace(/\/$/, '');
@@ -305,9 +338,12 @@ export class CwsHttpClient {
       }
 
       curUrl = nextUrl;
-      // 303 (and by common practice 302/301 for non-idempotent methods) → GET,
-      // and never carry a body across the redirect.
-      if (res.status === 303) curInit = { ...curInit, method: 'GET', body: undefined };
+      // Match native fetch's method/body semantics on the FOLLOWED hop (P2-b):
+      // 303 and 301/302-on-POST downgrade to a bodyless GET; 307/308 preserve
+      // method + body. This keeps a trusted follow identical to a native
+      // auto-follow so endpoints that legitimately redirect a POST are not
+      // re-POSTed with a stale JSON body/content-type.
+      curInit = rewriteInitForRedirect(curInit, res.status);
     }
   }
 

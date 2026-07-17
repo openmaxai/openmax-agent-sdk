@@ -286,3 +286,58 @@ test('P1-C: a NON-credentialed presigned getBytes follows redirects transparentl
   assert.equal(fetch.calls[0].opts.headers['CF-Access-Client-Id'], undefined, 'no CWS creds on hop 1');
   assert.equal(fetch.calls[1].opts.headers['CF-Access-Client-Id'], undefined, 'no CWS creds on hop 2');
 });
+
+// ── P2-b: a FOLLOWED redirect must match native fetch's method/body semantics ──
+// The round-2 fix only rewrote 303 → GET, but native fetch also downgrades
+// 301/302 on a POST to a bodyless GET, while preserving method+body on 307/308.
+// The old code re-POSTed the JSON body/content-type on a 301/302, breaking REST
+// endpoints that legitimately redirect a POST. These prove fetch-parity by
+// asserting the SECOND (followed) request's method + body + content-type.
+
+test('P2-b: a same-origin 302 on a POST is followed as a bodyless GET (fetch parity)', async () => {
+  const fetch = redirectFetch([
+    { status: 302, location: 'https://api.cws.test/thing/final' },
+    { status: 200, json: { data: { ok: true }, request_id: 'r' } },
+  ]);
+  const c = cfClient({ fetch });
+  c.setApiKey('jwt-token');
+  await c.post('/thing', { a: 1 });
+  assert.equal(fetch.calls.length, 2, 'the redirect was followed');
+  // hop 1: the original POST carried a JSON body + content-type.
+  assert.equal(fetch.calls[0].opts.method, 'POST');
+  assert.equal(fetch.calls[0].opts.headers['Content-Type'], 'application/json');
+  assert.equal(fetch.calls[0].opts.body, JSON.stringify({ a: 1 }));
+  // hop 2 (followed): downgraded to GET, body + content-type dropped (fetch parity).
+  assert.equal(fetch.calls[1].opts.method, 'GET', '302 on POST → GET');
+  assert.equal(fetch.calls[1].opts.body, undefined, 'the body is dropped on the GET');
+  assert.equal(fetch.calls[1].opts.headers['Content-Type'], undefined, 'content-type dropped');
+  // same trusted origin on both hops → creds legitimately re-applied.
+  assert.equal(fetch.calls[1].opts.headers.Authorization, 'Bearer jwt-token');
+});
+
+test('P2-b: a same-origin 307 on a POST preserves method + body + content-type (fetch parity)', async () => {
+  const fetch = redirectFetch([
+    { status: 307, location: 'https://api.cws.test/thing/final' },
+    { status: 200, json: { data: { ok: true }, request_id: 'r' } },
+  ]);
+  const c = cfClient({ fetch });
+  c.setApiKey('jwt-token');
+  await c.post('/thing', { a: 1 });
+  assert.equal(fetch.calls.length, 2);
+  assert.equal(fetch.calls[1].opts.method, 'POST', '307 preserves POST');
+  assert.equal(fetch.calls[1].opts.body, JSON.stringify({ a: 1 }), '307 preserves the body');
+  assert.equal(fetch.calls[1].opts.headers['Content-Type'], 'application/json', '307 preserves content-type');
+});
+
+test('P2-b: a same-origin 303 downgrades any method to a bodyless GET (fetch parity)', async () => {
+  const fetch = redirectFetch([
+    { status: 303, location: 'https://api.cws.test/thing/result' },
+    { status: 200, json: { data: { ok: true }, request_id: 'r' } },
+  ]);
+  const c = cfClient({ fetch });
+  c.setApiKey('jwt-token');
+  await c.post('/thing', { a: 1 });
+  assert.equal(fetch.calls[1].opts.method, 'GET', '303 → GET');
+  assert.equal(fetch.calls[1].opts.body, undefined, 'the body is dropped on a 303');
+  assert.equal(fetch.calls[1].opts.headers['Content-Type'], undefined, 'content-type dropped');
+});

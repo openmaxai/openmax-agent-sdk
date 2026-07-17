@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import { CwsAgentBridge } from './orchestrator.js';
 import { CwsHttpClient } from './transport/http.js';
+import { createDeduper } from './transport/ws.js';
 
 // Keep tests hermetic regardless of ambient CWS env config.
 for (const k of ['COCO_API_URL', 'COCO_API_KEY', 'COCO_ORG_ID', 'COCO_USER_TOKEN',
@@ -638,36 +639,100 @@ test('P1-B: the /sync catch-up path also treats a malformed ack as failure (no c
   await bridge.stop();
 });
 
-// ── P1-A: legacy plain-function callbacks.dedupe is accepted with a degraded warning ──
-test('P1-A: a legacy plain-function callbacks.dedupe still works (best-effort, warns)', async () => {
+// ── P1: a non-atomic (legacy plain-function) callbacks.dedupe is REJECTED ──────
+// A plain check-and-record function records the id at reserve and cannot release
+// it, so a {ok:false} deliver followed by a replay is permanently suppressed
+// (the message is lost after one attempt). A warning is not a fix — the SDK now
+// throws at construction so the mistake surfaces immediately.
+function newBridge({ http, orgConfigs, inbound, callbacks = {}, logger = quietLogger }) {
+  return new CwsAgentBridge({
+    http,
+    ws: { baseUrl: 'wss://test/ws', urlProvider: async () => 'wss://test/ws?ticket=t', wsFactory: () => new FakeWebSocket() },
+    orgConfigs,
+    providers: { inbound, logger },
+    callbacks: { syncSelf: async () => ({ nameReady: true }), ...callbacks },
+    reporters: { metrics: false, frameMetrics: false, markReadOnDeliver: false },
+  });
+}
+
+test('P1: constructing with a legacy plain-function dedupe THROWS (non-atomic rejected)', () => {
   const { http } = makeHttp(m1Routes());
-  const warns = [];
-  const legacyLogger = { info() {}, warn: (...a) => warns.push(a.join(' ')), error() {}, debug() {} };
   const seen = new Set();
   // Legacy shape: a bare callable with NO reserve()/commit()/release().
   const legacyDedupe = (id) => { if (seen.has(id)) return true; seen.add(id); return false; };
+  const inbound = { deliver: async () => ({ ok: true }) };
 
+  assert.throws(
+    () => newBridge({ http, orgConfigs: [baseOrg()], inbound, callbacks: { dedupe: legacyDedupe } }),
+    /custom dedupe must implement reserve\/commit\/release; pass none to use the built-in atomic deduper/,
+    'a non-atomic deduper is rejected at construction',
+  );
+});
+
+test('P1: a partial (reserve/commit but no release) dedupe also THROWS', () => {
+  const { http } = makeHttp(m1Routes());
+  const partial = () => false;
+  partial.reserve = () => true;
+  partial.commit = () => {};
+  // no release() → not the full atomic interface
+  const inbound = { deliver: async () => ({ ok: true }) };
+
+  assert.throws(
+    () => newBridge({ http, orgConfigs: [baseOrg()], inbound, callbacks: { dedupe: partial } }),
+    /custom dedupe must implement reserve\/commit\/release/,
+    'a dedupe missing release() is rejected',
+  );
+});
+
+test('P1: the default (no custom dedupe) and a proper atomic dedupe both construct + deliver', async () => {
+  // (a) default deduper — no callbacks.dedupe supplied.
+  {
+    const { http } = makeHttp(m1Routes());
+    const delivered = [];
+    const inbound = { deliver: async (msg) => { delivered.push(msg); return { ok: true }; } };
+    const bridge = newBridge({ http, orgConfigs: [baseOrg()], inbound });
+    await bridge.start();
+    bridge.injectFrame('o1', msgFrame());
+    await flush();
+    assert.equal(delivered.length, 1, 'default deduper delivers');
+    await bridge.stop();
+  }
+  // (b) a proper atomic deduper (createDeduper-shaped) supplied by the adapter.
+  {
+    const { http } = makeHttp(m1Routes());
+    const delivered = [];
+    const inbound = { deliver: async (msg) => { delivered.push(msg); return { ok: true }; } };
+    const atomic = createDeduper();
+    const bridge = newBridge({ http, orgConfigs: [baseOrg()], inbound, callbacks: { dedupe: atomic } });
+    await bridge.start();
+    bridge.injectFrame('o1', msgFrame());
+    await flush();
+    assert.equal(delivered.length, 1, 'a supplied atomic deduper delivers');
+    bridge.injectFrame('o1', msgFrame());
+    await flush();
+    assert.equal(delivered.length, 1, 'and still dedupes a committed duplicate');
+    await bridge.stop();
+  }
+});
+
+test('P1 (regression): default deduper {ok:false}-then-replay REDELIVERS (not permanently suppressed)', async () => {
+  const { http } = makeHttp(m1Routes());
+  const results = [{ ok: false, failureClass: 'wake_failed' }, { ok: true }];
+  let attempt = 0;
   const delivered = [];
-  const inbound = { deliver: async (msg) => { delivered.push(msg); return { ok: true }; } };
-  const bridge = new CwsAgentBridge({
-    http,
-    ws: { baseUrl: 'wss://test/ws', urlProvider: async () => 'wss://test/ws?ticket=t', wsFactory: () => new FakeWebSocket() },
-    orgConfigs: [baseOrg()],
-    providers: { inbound, logger: legacyLogger },
-    callbacks: { syncSelf: async () => ({ nameReady: true }), dedupe: legacyDedupe },
-    reporters: { metrics: false, frameMetrics: false, markReadOnDeliver: false },
-  });
+  const inbound = { deliver: async (msg) => { delivered.push(msg); return results[attempt++] ?? { ok: true }; } };
+  const bridge = newBridge({ http, orgConfigs: [baseOrg()], inbound });
   await bridge.start();
 
-  assert.ok(warns.some(w => /legacy plain-function callbacks\.dedupe/.test(w)),
-    'construction warned about degraded (non-atomic) legacy deduper semantics');
+  bridge.injectFrame('o1', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 1, 'first attempt returned {ok:false} (claim released, not committed)');
 
+  // The whole point of the atomic-deduper requirement: a failed deliver must not
+  // permanently suppress the id — the replay redelivers.
   bridge.injectFrame('o1', msgFrame());
   await flush();
-  assert.equal(delivered.length, 1, 'legacy deduper delivers the message');
-  bridge.injectFrame('o1', msgFrame());
-  await flush();
-  assert.equal(delivered.length, 1, 'legacy deduper still suppresses a committed duplicate (best-effort)');
+  assert.equal(delivered.length, 2, 'replay after {ok:false} REDELIVERED (retryable, not suppressed)');
 
   await bridge.stop();
 });

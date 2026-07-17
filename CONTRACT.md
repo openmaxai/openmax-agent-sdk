@@ -32,7 +32,7 @@ Each file carries a `$id` and a `version`.
 |------|---------|
 | `frame.schema.json` | Top-level inbound WS frame envelope (`type`, `payload`) + the classification enum (`FrameKind`: message / message_ack / system / error / heartbeat / presence / unknown) and the known payload shapes. |
 | `inbound-message.schema.json` | The normalized `InboundMessage` the orchestrator hands to `InboundDelivery.deliver` (text/type/attachments/endpoint/priority/decision + the raw merged `message`). `additionalProperties:false` — a drift alarm on new fields. |
-| `wake-request.schema.json` | The `raft-channel-wake.v1` request (`{schema, messageId, conversationId, senderId, contentPreview}`). |
+| `wake-request.schema.json` | The `raft-channel-wake.v1` request (`{schema, messageId, conversationId, senderId?, contentPreview}`; `senderId` is optional, mirroring the inbound-message). |
 | `wake-result.schema.json` | The `deliver()` / `POST /wake` response: `{ok:true, runtimeSession?}` \| `{ok:false, failureClass, retryAfterMs?}`, including the `ok:true ⇔ "genuinely entered the runtime context"` invariant. |
 | `failure-class.schema.json` | The enumerated `failureClass` values and their retry semantics. |
 | `auth-lifecycle.md` | The ws-ticket / bearer / JWT-refresh flow and the 4001–4006 close-code state machine (a behavioral state machine, so a doc rather than a data shape). |
@@ -87,7 +87,12 @@ Python SDK can independently state which contract version they implement.
 - **`wake-request` is adapter-built, not SDK-built.** The SDK never constructs the
   `/wake` body (Cat.B delivery lives behind `InboundDelivery.deliver` in the
   adapter). The schema pins the contract both sides must agree on; it is derived
-  from the fields the normalized `InboundMessage` carries.
+  from the fields the normalized `InboundMessage` carries. Consistent with that,
+  **`senderId` is OPTIONAL on `wake-request`** — the inbound-message carries an
+  optional `senderId` (the SDK still delivers a sender-unresolved message), so a
+  conformant Cat.B adapter must be able to express the same sender-less message.
+  The `04-sender-less` wake-request fixture pins that a sender-less body
+  validates. This is a schema-accuracy fix only — no delivery-behavior change.
 
 ## Interim reference (still useful, now secondary)
 

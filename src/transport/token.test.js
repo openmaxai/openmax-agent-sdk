@@ -177,3 +177,53 @@ test('P1-C: a same-origin token redirect is followed', async () => {
   assert.equal(fetch.calls.length, 2);
   assert.equal(fetch.calls[1].url, 'http://core.test/auth/agent/token/v2');
 });
+
+// ── P2-b: a FOLLOWED (same-origin) token redirect matches native fetch semantics ──
+// Token calls are POSTs. Native fetch downgrades a 301/302 on a POST to a
+// bodyless GET, but preserves method+body on 307/308. The old code re-POSTed the
+// JSON body on a 301/302 (and only rewrote 303), diverging from fetch and
+// breaking a core auth endpoint that legitimately redirects.
+
+test('P2-b: a same-origin 302 on a token POST is followed as a bodyless GET (fetch parity)', async () => {
+  const fetch = redirectFetch([
+    { status: 302, location: 'http://core.test/auth/agent/token/v2' },
+    { status: 200, json: { data: { access_token: 'AT', access_token_expires_at: FUTURE, refresh_token: 'R' } } },
+  ]);
+  const tm = new TokenManager({ apiKey: 'cwsk_test', coreUrl: 'http://core.test', fetch, logger: quietLogger });
+  const token = await tm.exchange('org9');
+  assert.equal(token, 'AT');
+  assert.equal(fetch.calls.length, 2);
+  // hop 1: original POST with a JSON body + content-type.
+  assert.equal(fetch.calls[0].opts.method, 'POST');
+  assert.deepEqual(fetch.calls[0].body, { org_id: 'org9' });
+  assert.equal(fetch.calls[0].opts.headers['Content-Type'], 'application/json');
+  // hop 2 (followed): downgraded to GET, body + content-type dropped.
+  assert.equal(fetch.calls[1].opts.method, 'GET', '302 on POST → GET');
+  assert.equal(fetch.calls[1].opts.body, undefined, 'the body is dropped on the followed GET');
+  assert.equal(fetch.calls[1].opts.headers['Content-Type'], undefined, 'content-type dropped');
+});
+
+test('P2-b: a same-origin 307 on a token POST preserves method + body + content-type (fetch parity)', async () => {
+  const fetch = redirectFetch([
+    { status: 307, location: 'http://core.test/auth/agent/token/v2' },
+    { status: 200, json: { data: { access_token: 'AT', access_token_expires_at: FUTURE, refresh_token: 'R' } } },
+  ]);
+  const tm = new TokenManager({ apiKey: 'cwsk_test', coreUrl: 'http://core.test', fetch, logger: quietLogger });
+  const token = await tm.exchange('org9');
+  assert.equal(token, 'AT');
+  assert.equal(fetch.calls[1].opts.method, 'POST', '307 preserves POST');
+  assert.deepEqual(fetch.calls[1].body, { org_id: 'org9' }, '307 preserves the body');
+  assert.equal(fetch.calls[1].opts.headers['Content-Type'], 'application/json', '307 preserves content-type');
+});
+
+test('P2-b: a same-origin 303 on a token POST downgrades to a bodyless GET (fetch parity)', async () => {
+  const fetch = redirectFetch([
+    { status: 303, location: 'http://core.test/auth/agent/token/done' },
+    { status: 200, json: { data: { access_token: 'AT', access_token_expires_at: FUTURE, refresh_token: 'R' } } },
+  ]);
+  const tm = new TokenManager({ apiKey: 'cwsk_test', coreUrl: 'http://core.test', fetch, logger: quietLogger });
+  await tm.exchange('org9');
+  assert.equal(fetch.calls[1].opts.method, 'GET', '303 → GET');
+  assert.equal(fetch.calls[1].opts.body, undefined, 'body dropped on 303');
+  assert.equal(fetch.calls[1].opts.headers['Content-Type'], undefined, 'content-type dropped');
+});
