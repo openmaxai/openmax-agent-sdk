@@ -1,5 +1,5 @@
 /**
- * @coco-xyz/cws-agent-sdk — single root export.
+ * @openmaxai/openmax-agent-sdk — single root export.
  *
  * Scaffold. Modules are re-exported here as they are extracted from
  * zylos-openmax (Phase A). Current tranche: providers.

@@ -1,4 +1,4 @@
-# @coco-xyz/cws-agent-sdk
+# @openmaxai/openmax-agent-sdk
 
 CWS agent runtime SDK — the **cws-comm protocol layer** extracted from `zylos-openmax`, so any agent runtime (Claude Code, Codex, OpenClaw, Hermes, …) can connect to COCO Workspace without depending on Zylos internals.
 
