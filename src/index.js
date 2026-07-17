@@ -31,8 +31,33 @@ export * from './protocol/system-message.js';  // isSystemSender, systemEventPri
 // src/cli/*.js; the argv/stdout CLI shell stays in the runtime adapter.
 export * from './services/index.js';  // {Tm,Kb,As,Comm,Core,Conn}Service + create* factories
 
+// ── sync layer (Phase A · milestone 4) ──────────────────────────────────────
+// Inbox-seq ledger (dedup + contiguous-ack watermark + gap detection) and the
+// `/sync` gap catch-up engine (cursor/has_more paging + ack). Protocol-only:
+// cursor persistence goes through the injected StorageProvider (ledger) / a
+// saveSession callback (engine); recovered events are handed to a supplied
+// onMessage handler — message assembly stays in the orchestrator/adapter.
+export * from './sync/inbox-ledger.js';   // createInboxLedger
+export * from './sync/sync-engine.js';    // SyncEngine, SYNC_PAGE_SIZE, SYNC_MAX_EVENTS
+
+// ── reporters (Phase A · milestone 4) — agent-level only ─────────────────────
+// Online self-report (onboarding trigger), runtime-metrics PUT, cgroup CPU/mem
+// gauges, and the LLM billing/credit gate. All DI: HTTP via CwsHttpClient,
+// runtime state via RuntimeStateProvider. The channel-liveness reporter is
+// intentionally NOT here — it is a channel (IM) concern and stays in the
+// adapter (owner decision 2026-07-17).
+export * from './reporters/online.js';    // createOnlineReporter
+export * from './reporters/metrics.js';   // createMetricsReporter, buildPayload, selectPrimaryOrg
+export * from './reporters/cgroup.js';    // createCgroupCollector (Linux /sys/fs/cgroup; DI-swappable)
+export * from './reporters/billing.js';   // isOrgLLMSuspended, resolveAgentOrigin, shouldSendOverdueNotice, OVERDUE_NOTICE, ...
+
+// ── identity (Phase A · milestone 4) ─────────────────────────────────────────
+// Agent public base-URL / domain resolution (consumed by CoreService.agentDomain)
+// and the startup self display_name hydration barrier.
+export * from './identity/agent-domain.js';          // resolveAgentBaseUrl, resolveAgentIdentityId, normalizeBaseUrl
+export * from './identity/self-name-hydration.js';   // createSelfNameHydrator
+
 // Extraction roadmap (uncomment as each tranche lands):
-// export * from './sync/sync-engine.js';
 // export * from './orchestrator.js';
 
 export const SDK_VERSION = '0.1.0-alpha.0';
