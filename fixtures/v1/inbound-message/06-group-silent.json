@@ -1,0 +1,27 @@
+{
+  "description": "A non-@-mentioned group message in an allowlisted group configured with mode=silent still passes decideInbound (handle:true) and is DELIVERED to the agent — silent is observe-only: the message is visible for context (participant/@mention registry, history) but the adapter MUST NOT auto-reply. Pins decision.mode='silent' and reason group:allowlist/silent through the real pipeline.",
+  "org": {
+    "slug": "o1",
+    "org_id": "org1",
+    "org_name": "Org One",
+    "self": { "member_id": "self1", "display_name": "Bot" },
+    "owner": { "member_id": "owner1", "name": "Owner" },
+    "access": { "groupPolicy": "allowlist", "groups": { "c3": { "mode": "silent" } } }
+  },
+  "frame": { "type": "message", "payload": { "id": "m6", "conversation_id": "c3", "sender_id": "u3" } },
+  "detail": {
+    "id": "m6", "sender_id": "u3", "sender_type": "HUMAN", "seq": 7, "type": "TEXT", "inbox_seq": 7,
+    "content": { "content_type": "text", "body": { "text": "just chatting, no mention" }, "attachments": [] }
+  },
+  "conversation": { "id": "c3", "type": "group", "name": "Silent Room" },
+  "expected": {
+    "conversationId": "c3",
+    "conversationType": "group",
+    "messageId": "m6",
+    "senderId": "u3",
+    "text": "just chatting, no mention",
+    "endpoint": "c3",
+    "via": "ws",
+    "decisionReasonIncludes": "group:allowlist/silent"
+  }
+}

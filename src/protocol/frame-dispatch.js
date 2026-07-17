@@ -28,7 +28,7 @@ export const FRAME_KIND = {
 };
 
 // Frame types that are transport/presence noise: acknowledged and dropped.
-const PRESENCE_TYPES = new Set(['typing', 'presence', 'read_receipt', 'read_state_update']);
+const PRESENCE_TYPES = new Set(['typing', 'presence', 'read_receipt', 'read_state_update', 'delivery_state_update']);
 const HEARTBEAT_TYPES = new Set(['ping', 'pong']);
 
 /**

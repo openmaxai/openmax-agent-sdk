@@ -669,10 +669,29 @@ export class CwsAgentBridge {
         try { this.callbacks.saveSession?.(slug, { sync_seq: ackedSeq }); } catch {}
         sync.ackSync(orgConfig, ackedSeq);
       },
-      onGapSync: () => { sync.syncMissedEvents(orgConfig, sessionRef); },
+      // #5: the ledger hands its durable acked_seq as the sweep FLOOR. Passing it
+      // through lets syncMissedEvents re-pull a hole BELOW the persisted cursor
+      // (a live delivery that advanced the cursor via a concurrent sweep but then
+      // failed, so the ledger never recorded that seq). The old handler discarded
+      // the arg and swept only from sessionRef.sync_seq — which can be ahead of
+      // the durable ack, leaving that hole unrecoverable.
+      onGapSync: (ackedSeq) => { sync.syncMissedEvents(orgConfig, sessionRef, ackedSeq); },
     });
     await ledger.load();
     if (syncSeq > 0) ledger.setAckedSeq(syncSeq);
+    // #4: seed the SESSION cursor from the ledger's durable acked_seq when the
+    // session file's sync_seq is stale/behind. The ledger persists acked_seq on
+    // every record (durable), but the session cursor only advances on the 5s
+    // onAck tick — which may not have fired before a restart. Without this, a
+    // stale/0 session cursor sends onOpen down the initSyncSeq (seek-to-inbox-end)
+    // path, discarding every message that arrived during the outage. Seeding from
+    // acked_seq is safe: it only advances after a genuine ok:true delivery, and
+    // replays ≤ this watermark are deduped by ledger.has() (bounded replay).
+    const durableAcked = ledger.getAckedSeq?.() ?? 0;
+    if (durableAcked > sessionRef.sync_seq) {
+      this.#log(`[${slug}] seeded sync_seq from ledger acked_seq=${durableAcked} (session cursor was ${sessionRef.sync_seq})`);
+      sessionRef.sync_seq = durableAcked;
+    }
     ledger.start();
 
     const handleIncomingMessage = this.#makeOrgMessageHandler(orgConfig, sessionRef, ledger);
@@ -840,8 +859,17 @@ export class CwsAgentBridge {
     for (const t of this._timers) { try { clearInterval(t); clearTimeout(t); } catch {} }
     this._timers = [];
     const flushes = [];
-    for (const [, rec] of this._orgs) {
+    for (const [slug, rec] of this._orgs) {
       try { rec.ws.stop(); } catch {}
+      // #4: flush the session sync cursor from the ledger's durable watermark
+      // before shutdown, so a restart resumes from the last genuinely-consumed
+      // seq instead of seeking to inbox end (the 5s onAck tick may not have
+      // fired). Best-effort; the on-start acked_seq seeding recovers this even
+      // if saveSession is a no-op.
+      try {
+        const durable = Math.max(rec.sessionRef?.sync_seq || 0, rec.ledger.getAckedSeq?.() || 0);
+        if (durable > 0) this.callbacks.saveSession?.(slug, { sync_seq: durable });
+      } catch {}
       try { flushes.push(Promise.resolve(rec.ledger.stop())); } catch {}
     }
     await Promise.allSettled(flushes);

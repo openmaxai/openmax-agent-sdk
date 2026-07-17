@@ -24,6 +24,7 @@ export * from './protocol/message-codec.js';   // newClientMsgId, parseEndpoint,
 export * from './protocol/frame-dispatch.js';  // classifyFrame, classifySystemEvent, createFrameDispatcher, FRAME_KIND
 export * from './protocol/access-policy.js';   // decideInbound, isSiblingAgentSender, extractMentions, isSelfNameMentionedInText, notices, VALID_* sets
 export * from './protocol/system-message.js';  // isSystemSender, systemEventPriority
+export * from './protocol/mention.js';         // createMentionRegistry (outbound @mention canonicalization, StorageProvider-backed)
 
 // ── service clients (Phase A · milestone 3) ─────────────────────────────────
 // Programmatic REST clients for the cws-core surface (tm/kb/as/comm/core/conn),
