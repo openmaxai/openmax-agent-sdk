@@ -1,0 +1,27 @@
+{
+  "description": "Live openmax.com sends id-type fields as JSON numbers (e.g. messageId 1784124726965, senderId). The canonical InboundMessage/wake-request contract declares them as strings, and schema-exact adapters (e.g. a /wake gate) reject numbers. The SDK must canonicalize numeric ids to strings at the ingestion boundary. Regression for the first contract drift found on real hardware — prior fixtures were all-string, so this class of bug was never exercised.",
+  "org": {
+    "slug": "o1",
+    "org_id": "org1",
+    "org_name": "Org One",
+    "self": { "member_id": "self1", "display_name": "Bot" },
+    "owner": { "member_id": "owner1", "name": "Owner" },
+    "access": { "dmPolicy": "open" }
+  },
+  "frame": { "type": "message", "payload": { "id": 1784124726965, "conversation_id": "c1", "sender_id": 7, "seq": 6 } },
+  "detail": {
+    "id": 1784124726965, "sender_id": 7, "sender_type": "HUMAN", "seq": 6, "type": "TEXT", "inbox_seq": 6,
+    "content": { "content_type": "text", "body": { "text": "numeric ids" }, "attachments": [] }
+  },
+  "conversation": { "id": "c1", "type": "dm" },
+  "expected": {
+    "conversationId": "c1",
+    "conversationType": "dm",
+    "messageId": "1784124726965",
+    "senderId": "7",
+    "seq": 6,
+    "text": "numeric ids",
+    "endpoint": "c1",
+    "decisionReasonIncludes": "dm:open"
+  }
+}
