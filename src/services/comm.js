@@ -186,12 +186,12 @@ export class CommService {
 
   /**
    * Resolve the target org block from an injected config provider. Accepts
-   * `org`/`orgSlug`/`orgId` as an org key (org_id), org UUID, or org_name
-   * (case-insensitive); with none, defaults to the single enabled org.
+   * `org`/`orgId`/`org_id` as an org_id, or an org_name (case-insensitive);
+   * with none, defaults to the single enabled org.
    */
   _resolveOrgConfig(p) {
     const config = this._requireConfig('resolveOrgConfig');
-    const key = p.org || p.orgSlug || p.orgId || p.org_id;
+    const key = p.org || p.orgId || p.org_id;
     const enabled = config.enabledOrgs();
     if (key) {
       const byKey = enabled.find((o) => o.org_id === key);
@@ -225,10 +225,10 @@ export class CommService {
     const coreOwnerId = member?.owner_member_id || '';
     const localOwnerId = org.owner?.member_id || '';
     if (!coreOwnerId) {
-      return { org_slug: org.org_id, synced: false, reason: 'core has no owner recorded; local binding left as-is', local_owner_id: localOwnerId };
+      return { org_id: org.org_id, synced: false, reason: 'core has no owner recorded; local binding left as-is', local_owner_id: localOwnerId };
     }
     if (coreOwnerId === localOwnerId) {
-      return { org_slug: org.org_id, synced: false, reason: 'already in sync', owner_id: coreOwnerId };
+      return { org_id: org.org_id, synced: false, reason: 'already in sync', owner_id: coreOwnerId };
     }
     let name = '';
     try {
@@ -236,7 +236,7 @@ export class CommService {
       name = ownerMember?.display_name || ownerMember?.username || '';
     } catch { /* name is cosmetic */ }
     config.setOwner(org.org_id, coreOwnerId, name);
-    return { org_slug: org.org_id, synced: true, previous_owner_id: localOwnerId, owner: { member_id: coreOwnerId, name } };
+    return { org_id: org.org_id, synced: true, previous_owner_id: localOwnerId, owner: { member_id: coreOwnerId, name } };
   }
 
   // ---- DM access control (local config, hot-reloaded) ----------------------

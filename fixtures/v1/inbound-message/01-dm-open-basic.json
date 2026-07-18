@@ -15,7 +15,6 @@
   "conversation": { "id": "c1", "type": "dm", "name": "DM" },
   "expected": {
     "orgId": "org1",
-    "orgSlug": "org1",
     "conversationId": "c1",
     "conversationType": "dm",
     "messageId": "m1",

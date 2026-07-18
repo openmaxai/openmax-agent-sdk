@@ -505,7 +505,6 @@ export class CwsAgentBridge {
     });
     return {
       orgId: orgConfig.org_id,
-      orgSlug: orgConfig.org_id,   // deprecated alias of orgId (kept for consumers reading orgSlug)
       orgName: orgConfig.org_name,
       conversation: conv || { id: idStr(msg.conversation_id) },
       conversationId: idStr(msg.conversation_id),

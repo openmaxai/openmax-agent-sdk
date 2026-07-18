@@ -143,7 +143,7 @@ test('inbound message frame flows dedupe → normalize → access-policy → del
   assert.equal(d.endpoint, 'c1', 'endpoint formatted from the conversation');
   assert.ok(d.msg.message, 'raw merged frame passed through for the adapter');
   assert.equal(d.msg.orgId, 'org1', 'inbound object carries orgId = org_id');
-  assert.equal(d.msg.orgSlug, 'org1', 'orgSlug is a deprecated alias of org_id');
+  assert.equal('orgSlug' in d.msg, false, 'no deprecated orgSlug alias — org_id only');
 
   // Dedupe: re-injecting the same message id delivers nothing more.
   bridge.injectFrame('org1', msgFrame());
