@@ -1,7 +1,6 @@
 {
   "description": "A real-pipeline case where message-detail cannot resolve the sender: neither the notification frame nor the fetched detail carries sender_id. Under dmPolicy=open the SDK STILL delivers the message, and the normalized InboundMessage has NO senderId. This fixture pins the reality that senderId is OPTIONAL (P2): it must validate against inbound-message.schema even with senderId absent. Delivery/rejection behavior is unchanged — the owner separately decides whether to reject sender-less messages.",
   "org": {
-    "slug": "o1",
     "org_id": "org1",
     "org_name": "Org One",
     "self": { "member_id": "self1", "display_name": "Bot" },
@@ -16,7 +15,6 @@
   "conversation": { "id": "c1", "type": "dm", "name": "DM" },
   "expected": {
     "orgId": "org1",
-    "orgSlug": "o1",
     "conversationId": "c1",
     "conversationType": "dm",
     "messageId": "m5",

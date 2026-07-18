@@ -166,7 +166,7 @@ async function runInboundFixture(fx) {
     reporters: { metrics: false, frameMetrics: false, markReadOnDeliver: false },
   });
   await bridge.start();
-  bridge.injectFrame(fx.org.slug, fx.frame);
+  bridge.injectFrame(fx.org.org_id, fx.frame);
   await flush();
   await bridge.stop();
   return delivered;

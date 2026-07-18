@@ -7,7 +7,6 @@
   "type": "object",
   "required": [
     "orgId",
-    "orgSlug",
     "conversation",
     "conversationId",
     "conversationType",
@@ -26,7 +25,6 @@
   ],
   "properties": {
     "orgId": { "type": "string", "description": "orgConfig.org_id" },
-    "orgSlug": { "type": "string", "description": "orgConfig.slug" },
     "orgName": { "type": "string", "description": "orgConfig.org_name (omitted when the config has none)." },
     "conversation": {
       "type": "object",

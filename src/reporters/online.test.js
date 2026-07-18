@@ -21,7 +21,8 @@ function makeReporter({ liveMemberId = '', post } = {}) {
 }
 
 function org(memberId = '') {
-  return { slug: 'org-a', org_id: 'org-id-a', self: { member_id: memberId, name: '' } };
+  // Keyed by org_id end to end — loadConfig().orgs is keyed by 'org-a' too.
+  return { org_id: 'org-a', self: { member_id: memberId, name: '' } };
 }
 
 test('member_id 无处可取时跳过且不标记 done（下次调用仍会重试）', async () => {

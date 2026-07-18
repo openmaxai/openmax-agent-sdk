@@ -22,9 +22,9 @@
  *     enabledOrgs(): OrgConfig[],
  *     getOrgByOrgId(id): OrgConfig | undefined,
  *     updateConfig(fn): Config,        // mutate-in-place, returns updated config
- *     setOwner(slug, memberId, name): void,
+ *     setOwner(orgId, memberId, name): void,
  *   }
- * where OrgConfig has at least { slug, org_id, org_name?, self?, owner?, access? }.
+ * where OrgConfig has at least { org_id, org_name?, self?, owner?, access? }.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -186,15 +186,15 @@ export class CommService {
 
   /**
    * Resolve the target org block from an injected config provider. Accepts
-   * `org`/`orgSlug`/`orgId` as a config key (slug), org UUID, or org_name
-   * (case-insensitive); with none, defaults to the single enabled org.
+   * `org`/`orgId`/`org_id` as an org_id, or an org_name (case-insensitive);
+   * with none, defaults to the single enabled org.
    */
   _resolveOrgConfig(p) {
     const config = this._requireConfig('resolveOrgConfig');
-    const key = p.org || p.orgSlug || p.orgId || p.org_id;
+    const key = p.org || p.orgId || p.org_id;
     const enabled = config.enabledOrgs();
     if (key) {
-      const byKey = enabled.find((o) => o.slug === key);
+      const byKey = enabled.find((o) => o.org_id === key);
       if (byKey) return byKey;
       const byId = config.getOrgByOrgId ? config.getOrgByOrgId(key) : undefined;
       if (byId) return byId;
@@ -202,19 +202,19 @@ export class CommService {
       const keyNorm = norm(key);
       const byName = enabled.find((o) => norm(o.org_name) === keyNorm);
       if (byName) return byName;
-      const names = enabled.map((o) => o.org_name || o.slug).join(', ');
+      const names = enabled.map((o) => o.org_name || o.org_id).join(', ');
       throw new Error(`org not found in config: "${key}" (known: ${names || 'none'})`);
     }
     if (enabled.length === 1) return enabled[0];
     if (enabled.length === 0) throw new Error('no enabled orgs in config.orgs');
-    const names = enabled.map((o) => o.org_name || o.slug).join(', ');
+    const names = enabled.map((o) => o.org_name || o.org_id).join(', ');
     throw new Error(`multiple enabled orgs — pass {"org":"<name>"} (one of: ${names})`);
   }
 
   // Read this agent's own member record; the authoritative owner_member_id lives here.
   _fetchSelfMember(org) {
     const selfId = org.self?.member_id;
-    if (!selfId) throw new Error(`org "${org.slug}" has no self.member_id yet (token exchange not completed)`);
+    if (!selfId) throw new Error(`org "${org.org_id}" has no self.member_id yet (token exchange not completed)`);
     return this.http.getForOrg(org.org_id, this._p(`/members/${selfId}`));
   }
 
@@ -225,18 +225,18 @@ export class CommService {
     const coreOwnerId = member?.owner_member_id || '';
     const localOwnerId = org.owner?.member_id || '';
     if (!coreOwnerId) {
-      return { org_slug: org.slug, synced: false, reason: 'core has no owner recorded; local binding left as-is', local_owner_id: localOwnerId };
+      return { org_id: org.org_id, synced: false, reason: 'core has no owner recorded; local binding left as-is', local_owner_id: localOwnerId };
     }
     if (coreOwnerId === localOwnerId) {
-      return { org_slug: org.slug, synced: false, reason: 'already in sync', owner_id: coreOwnerId };
+      return { org_id: org.org_id, synced: false, reason: 'already in sync', owner_id: coreOwnerId };
     }
     let name = '';
     try {
       const ownerMember = await this.http.getForOrg(org.org_id, this._p(`/members/${coreOwnerId}`));
       name = ownerMember?.display_name || ownerMember?.username || '';
     } catch { /* name is cosmetic */ }
-    config.setOwner(org.slug, coreOwnerId, name);
-    return { org_slug: org.slug, synced: true, previous_owner_id: localOwnerId, owner: { member_id: coreOwnerId, name } };
+    config.setOwner(org.org_id, coreOwnerId, name);
+    return { org_id: org.org_id, synced: true, previous_owner_id: localOwnerId, owner: { member_id: coreOwnerId, name } };
   }
 
   // ---- DM access control (local config, hot-reloaded) ----------------------
@@ -251,18 +251,18 @@ export class CommService {
         throw new Error(`Invalid policy: ${params.policy}. Must be one of: ${valid.join(', ')}`);
       }
       config.updateConfig((cfg) => {
-        cfg.orgs[org.slug].access = { ...cfg.orgs[org.slug].access, dmPolicy: params.policy };
+        cfg.orgs[org.org_id].access = { ...cfg.orgs[org.org_id].access, dmPolicy: params.policy };
       });
-      return { org: org.org_name || org.slug, dmPolicy: params.policy, applied: true };
+      return { org: org.org_name || org.org_id, dmPolicy: params.policy, applied: true };
     }
-    return { org: org.org_name || org.slug, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
+    return { org: org.org_name || org.org_id, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
   }
 
   dmList(params = {}) {
     this._requireConfig('dmList');
     const org = this._resolveOrgConfig(params);
     const access = org.access || {};
-    return { org: org.org_name || org.slug, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
+    return { org: org.org_name || org.org_id, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
   }
 
   dmAllow(params = {}) {
@@ -273,12 +273,12 @@ export class CommService {
     if (!ids.length) throw new Error('memberIds (or memberId) required');
     const org = this._resolveOrgConfig(params);
     const result = config.updateConfig((cfg) => {
-      const access = cfg.orgs[org.slug].access = cfg.orgs[org.slug].access || {};
+      const access = cfg.orgs[org.org_id].access = cfg.orgs[org.org_id].access || {};
       const list = new Set(access.dmAllowFrom || []);
       for (const id of ids) list.add(id);
       access.dmAllowFrom = [...list];
     });
-    return { org: org.org_name || org.slug, dmAllowFrom: result.orgs[org.slug].access.dmAllowFrom, added: ids };
+    return { org: org.org_name || org.org_id, dmAllowFrom: result.orgs[org.org_id].access.dmAllowFrom, added: ids };
   }
 
   dmRevoke(params = {}) {
@@ -289,11 +289,11 @@ export class CommService {
     if (!ids.length) throw new Error('memberIds (or memberId) required');
     const org = this._resolveOrgConfig(params);
     const result = config.updateConfig((cfg) => {
-      const access = cfg.orgs[org.slug].access = cfg.orgs[org.slug].access || {};
+      const access = cfg.orgs[org.org_id].access = cfg.orgs[org.org_id].access || {};
       const remove = new Set(ids.map(String));
       access.dmAllowFrom = (access.dmAllowFrom || []).filter((id) => !remove.has(String(id)));
     });
-    return { org: org.org_name || org.slug, dmAllowFrom: result.orgs[org.slug].access.dmAllowFrom, removed: ids };
+    return { org: org.org_name || org.org_id, dmAllowFrom: result.orgs[org.org_id].access.dmAllowFrom, removed: ids };
   }
 }
 

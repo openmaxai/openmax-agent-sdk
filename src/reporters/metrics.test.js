@@ -75,7 +75,7 @@ test('selectPrimaryOrg: first inserted org is primary', () => {
     ['b', { org_id: 'ob', self: { member_id: 'mb' } }],
   ]);
   const p = selectPrimaryOrg(m);
-  assert.equal(p.slug, 'a');
+  assert.equal(p.orgId, 'a');
   assert.equal(p.selfMemberId, 'ma');
 });
 

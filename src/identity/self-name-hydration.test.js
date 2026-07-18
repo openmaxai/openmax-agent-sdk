@@ -6,8 +6,8 @@ const noop = () => {};
 
 function org(selfOverrides = {}) {
   return {
-    slug: 'org-a',
-    org_id: 'org-id-a',
+    // Keyed by org_id end to end — loadConfig().orgs is keyed by 'org-a' too.
+    org_id: 'org-a',
     self: { member_id: 'm-self', name: 'OldName', display_name: '', ...selfOverrides },
   };
 }

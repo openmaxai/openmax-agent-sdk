@@ -1,7 +1,6 @@
 {
   "description": "A DM under dmPolicy=open normalizes to InboundMessage with text hoisted from the fetched detail, endpoint = conversationId, decision dm:open.",
   "org": {
-    "slug": "o1",
     "org_id": "org1",
     "org_name": "Org One",
     "self": { "member_id": "self1", "display_name": "Bot" },
@@ -16,7 +15,6 @@
   "conversation": { "id": "c1", "type": "dm", "name": "DM" },
   "expected": {
     "orgId": "org1",
-    "orgSlug": "o1",
     "conversationId": "c1",
     "conversationType": "dm",
     "messageId": "m1",

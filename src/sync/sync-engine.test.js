@@ -29,7 +29,7 @@ function pager(pages) {
   return () => pages[i++] ?? { events: [], has_more: false };
 }
 
-const org = { org_id: 'org-1', slug: 'org-a' };
+const org = { org_id: 'org-1' };
 
 test('constructor validates required deps', () => {
   assert.throws(() => new SyncEngine({ onMessage: () => {} }), /requires a CwsHttpClient/);
@@ -57,7 +57,7 @@ test('syncMissedEvents: feeds events, advances + persists cursor, acks highest s
   const engine = new SyncEngine({
     http,
     onMessage: async (ev) => seen.push(ev),
-    saveSession: (slug, partial) => saved.push({ slug, partial }),
+    saveSession: (orgId, partial) => saved.push({ orgId, partial }),
     deviceId: 'dev-9',
     appVersion: '1.2.3',
     logger: quiet,
@@ -70,7 +70,7 @@ test('syncMissedEvents: feeds events, advances + persists cursor, acks highest s
     { id: 'm2', conversation_id: 'c2', seq: 12, _via: 'sync' },
   ]);
   assert.equal(sessionRef.sync_seq, 12);
-  assert.deepEqual(saved, [{ slug: 'org-a', partial: { sync_seq: 12 } }]);
+  assert.deepEqual(saved, [{ orgId: 'org-1', partial: { sync_seq: 12 } }]);
   // First call is /sync with the starting cursor + device id.
   assert.equal(http.calls[0].path, SYNC);
   assert.deepEqual(http.calls[0].body, { since_seq: 10, device_id: 'dev-9', limit: SYNC_PAGE_SIZE });
@@ -122,7 +122,7 @@ test('syncMissedEvents: per-org in-flight guard prevents overlapping sweeps', as
   });
   const engine = new SyncEngine({ http, onMessage: async () => {}, logger: quiet });
   const sessionRef = { sync_seq: 10 };
-  const p1 = engine.syncMissedEvents(org, sessionRef); // adds slug to _inFlight synchronously
+  const p1 = engine.syncMissedEvents(org, sessionRef); // adds org_id to _inFlight synchronously
   const p2 = engine.syncMissedEvents(org, sessionRef); // sees in-flight → skips
   await Promise.all([p1, p2]);
   assert.equal(http.calls.filter((c) => c.path === SYNC).length, 1);
@@ -192,7 +192,7 @@ test('syncMissedEvents: a lower gap-sync floor never rewinds the persisted curso
   });
   const engine = new SyncEngine({
     http, onMessage: async () => {},
-    saveSession: (slug, partial) => saved.push(partial), logger: quiet,
+    saveSession: (orgId, partial) => saved.push(partial), logger: quiet,
   });
   const sessionRef = { sync_seq: 10 };
   await engine.syncMissedEvents(org, sessionRef, 7);
@@ -219,13 +219,13 @@ test('initSyncSeq: seeks to the inbox end via next_cursor and persists', async (
   });
   const engine = new SyncEngine({
     http, onMessage: async () => {},
-    saveSession: (slug, partial) => saved.push({ slug, partial }),
+    saveSession: (orgId, partial) => saved.push({ orgId, partial }),
     logger: quiet,
   });
   const sessionRef = { sync_seq: 0 };
   await engine.initSyncSeq(org, sessionRef);
   assert.equal(sessionRef.sync_seq, 9);
-  assert.deepEqual(saved, [{ slug: 'org-a', partial: { org_id: 'org-1', sync_seq: 9 } }]);
+  assert.deepEqual(saved, [{ orgId: 'org-1', partial: { org_id: 'org-1', sync_seq: 9 } }]);
 });
 
 test('initSyncSeq: falls back to the last event seq when next_cursor is absent', async () => {

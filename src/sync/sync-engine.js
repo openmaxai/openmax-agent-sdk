@@ -18,7 +18,7 @@
  *     `config.agent.device_id` / `app_version` reads are replaced by the
  *     injected `CwsHttpClient` and `deviceId` / `appVersion` constructor opts.
  *   - `saveOrgSession(...)` (session.js file write) is replaced by an injected
- *     `saveSession(slug, partial)` callback — session.js is a separate module
+ *     `saveSession(orgId, partial)` callback — session.js is a separate module
  *     (its own extraction milestone); the caller still owns the mutable
  *     `sessionRef` cursor object, exactly as comm-bridge did.
  *   - The inbox ledger (continuous-ack watermark + gap detection) is a separate
@@ -40,7 +40,7 @@ export class SyncEngine {
    * @param {import('../transport/http.js').CwsHttpClient} deps.http  cws-core client
    * @param {(ev: {id:string, conversation_id:string, seq:number, _via:'sync'}) => Promise<void>} deps.onMessage
    *        handler fed each recovered event (protocol-only; assembly is the caller's).
-   * @param {(slug: string, partial: object) => void} [deps.saveSession]  persist the cursor
+   * @param {(orgId: string, partial: object) => void} [deps.saveSession]  persist the cursor
    *        (default no-op; the caller may instead read the mutated sessionRef).
    * @param {import('../providers.js').Logger} [deps.logger]
    * @param {string} [deps.deviceId]    X-derived device id sent to /sync + /sync/ack
@@ -82,7 +82,7 @@ export class SyncEngine {
    * to onMessage, advance + persist the cursor, then ack the highest seq.
    * No-op on the first-ever connect (sync_seq falsy → nothing to catch up).
    *
-   * @param {{org_id:string, slug:string}} orgConfig
+   * @param {{org_id:string}} orgConfig
    * @param {{sync_seq:number}} sessionRef  mutable cursor holder (mutated in place)
    * @param {number|null} [floorSeq]  gap-sync sweep floor (the inbox-ledger's
    *        durable acked_seq). When supplied, the sweep starts from
@@ -92,11 +92,11 @@ export class SyncEngine {
    */
   async syncMissedEvents(orgConfig, sessionRef, floorSeq = null) {
     if (!sessionRef.sync_seq) return; // first-ever connect → nothing to catch up
-    if (this._inFlight.has(orgConfig.slug)) {
-      this._log(`[${orgConfig.slug}] sync already in flight, skipping`);
+    if (this._inFlight.has(orgConfig.org_id)) {
+      this._log(`[${orgConfig.org_id}] sync already in flight, skipping`);
       return;
     }
-    this._inFlight.add(orgConfig.slug);
+    this._inFlight.add(orgConfig.org_id);
     try {
       const cursorSeq = sessionRef.sync_seq;
       // #5: floor the sweep at the ledger's durable acked_seq when provided. The
@@ -141,19 +141,19 @@ export class SyncEngine {
       const newCursor = Math.max(cursorSeq, sinceSeq);
       if (newCursor > cursorSeq) {
         sessionRef.sync_seq = newCursor;
-        this.saveSession(orgConfig.slug, { sync_seq: newCursor });
+        this.saveSession(orgConfig.org_id, { sync_seq: newCursor });
       }
 
       if (totalSynced > 0) {
-        this._log(`[${orgConfig.slug}] sync caught up ${totalSynced} event(s) since seq=${startSeq}, new sync_seq=${sessionRef.sync_seq}` +
+        this._log(`[${orgConfig.org_id}] sync caught up ${totalSynced} event(s) since seq=${startSeq}, new sync_seq=${sessionRef.sync_seq}` +
           (hasMore && totalSynced >= this.maxEvents ? ` (hit per-sweep cap, more on next reconnect)` : ''));
       }
       // Ack the highest processed seq to cws-comm (best-effort).
       if (sinceSeq > 0) await this.ackSync(orgConfig, sinceSeq);
     } catch (err) {
-      this._warn(`[${orgConfig.slug}] sync failed: ${err.message} — will retry on next reconnect`);
+      this._warn(`[${orgConfig.org_id}] sync failed: ${err.message} — will retry on next reconnect`);
     } finally {
-      this._inFlight.delete(orgConfig.slug);
+      this._inFlight.delete(orgConfig.org_id);
     }
   }
 
@@ -164,7 +164,7 @@ export class SyncEngine {
    * the max cursor — a one-time cost per new bot that avoids pulling full
    * history later. Persists the resolved cursor.
    *
-   * @param {{org_id:string, slug:string}} orgConfig
+   * @param {{org_id:string}} orgConfig
    * @param {{sync_seq:number}} sessionRef  mutated in place
    */
   async initSyncSeq(orgConfig, sessionRef) {
@@ -187,17 +187,17 @@ export class SyncEngine {
       }
       if (cursor > 0) {
         sessionRef.sync_seq = cursor;
-        this.saveSession(orgConfig.slug, { org_id: orgConfig.org_id, sync_seq: cursor });
-        this._log(`[${orgConfig.slug}] init sync_seq=${cursor} (seeked to inbox end)`);
+        this.saveSession(orgConfig.org_id, { org_id: orgConfig.org_id, sync_seq: cursor });
+        this._log(`[${orgConfig.org_id}] init sync_seq=${cursor} (seeked to inbox end)`);
       }
     } catch (err) {
-      this._warn(`[${orgConfig.slug}] initSyncSeq failed: ${err.message}`);
+      this._warn(`[${orgConfig.org_id}] initSyncSeq failed: ${err.message}`);
     }
   }
 
   /**
    * Tell cws-comm how far we've consumed (best-effort; never throws).
-   * @param {{org_id:string, slug:string}} orgConfig
+   * @param {{org_id:string}} orgConfig
    * @param {number} seq  highest contiguously-consumed inbox seq
    */
   async ackSync(orgConfig, seq) {
@@ -208,9 +208,9 @@ export class SyncEngine {
         platform: 'agent',
         app_version: this.appVersion,
       });
-      this._log(`[${orgConfig.slug}] ack sync_seq=${seq}`);
+      this._log(`[${orgConfig.org_id}] ack sync_seq=${seq}`);
     } catch (err) {
-      this._warn(`[${orgConfig.slug}] ackSync failed: ${err.message}`);
+      this._warn(`[${orgConfig.org_id}] ackSync failed: ${err.message}`);
     }
   }
 }

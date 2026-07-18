@@ -34,7 +34,7 @@ test('selfRename PATCHes /me and mirrors the name into config; returns orgs_sync
   const { http, fetch } = makeClient([ok({ display_name: 'Neo', identity_id: 'id1' })]);
   const cfg = { orgs: { acme: { self: {} }, beta: { self: { name: 'old' } } } };
   const config = {
-    enabledOrgs: () => [{ slug: 'acme' }, { slug: 'beta' }],
+    enabledOrgs: () => [{ org_id: 'acme' }, { org_id: 'beta' }],
     updateConfig: (fn) => { fn(cfg); return cfg; },
   };
   const out = await new CoreService(http, config).selfRename({ name: '  Neo  ' });
