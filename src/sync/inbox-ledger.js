@@ -6,13 +6,13 @@
  * triggers ackSync, and detects gaps that need /sync backfill.
  *
  * State schema (persisted via the injected StorageProvider under `key`,
- * default `inbox-{orgSlug}.json`):
+ * default `inbox-{orgId}.json`):
  *   { acked_seq: number, received: number[] }
  *
  * Extraction notes (ported from zylos-openmax src/lib/inbox-ledger.js):
  *   - The hard-coded `fs` + `RUNTIME_DIR` file path is replaced by the injected
  *     StorageProvider (`get(key)` / `set(key, value)`, string values). The
- *     adapter maps `key` to a concrete path (zylos → runtime/inbox-{slug}.json).
+ *     adapter maps `key` to a concrete path (zylos → runtime/inbox-{orgId}.json).
  *     Because the provider is async, `load()` is now an awaited method (call it
  *     — and await it — before `setAckedSeq()` / `start()`), and the tmp+rename
  *     atomic write moves behind the provider's `set`.
@@ -27,12 +27,12 @@ const GAP_TIMEOUT_MS = 10_000;
 const RECEIVED_CAP = 5000;
 const PERSIST_DEBOUNCE_MS = 1_000;
 
-export function createInboxLedger(orgSlug, {
+export function createInboxLedger(orgId, {
   onAck,
   onGapSync,
   log = () => {},
   storage = memoryStorage(),
-  key = `inbox-${orgSlug}.json`,
+  key = `inbox-${orgId}.json`,
   tickIntervalMs = TICK_INTERVAL_MS,
   gapTimeoutMs = GAP_TIMEOUT_MS,
   receivedCap = RECEIVED_CAP,

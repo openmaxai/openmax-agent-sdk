@@ -14,7 +14,7 @@ import {
   OVERDUE_NOTICE_THROTTLE_MS,
 } from './billing.js';
 
-const org = (id = 'org-1') => ({ org_id: id, slug: id, self: { member_id: 'm-1' } });
+const org = (id = 'org-1') => ({ org_id: id, self: { member_id: 'm-1' } });
 
 const isMembersPath = (p) => /\/members\//.test(String(p));
 
@@ -245,7 +245,7 @@ test('AGENT_ORIGIN_TIMEOUT_MS default is ~800ms', () => {
 test('resolveAgentOrigin: missing self.member_id → null and not cached', async () => {
   let called = 0;
   const getForOrg = async () => { called += 1; return { agent_origin: 'platform_created' }; };
-  assert.equal(await resolveAgentOrigin({ org_id: 'org-1', slug: 'org-1' }, { getForOrg, warn: () => {} }), null);
+  assert.equal(await resolveAgentOrigin({ org_id: 'org-1' }, { getForOrg, warn: () => {} }), null);
   assert.equal(called, 0, 'no lookup without a member_id');
   assert.equal(agentOriginCache.size, 0);
 });
@@ -276,7 +276,7 @@ test('throttle: different orgs on same conv id do not share a bucket', () => {
 
 test('missing org_id → false without querying', async () => {
   const { getForOrg, calls } = stubGet({ suspended: true });
-  assert.equal(await isOrgLLMSuspended({ slug: 'no-id' }, { getForOrg }), false);
+  assert.equal(await isOrgLLMSuspended({}, { getForOrg }), false);
   assert.equal(calls.length, 0);
 });
 

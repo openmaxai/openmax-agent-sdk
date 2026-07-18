@@ -58,22 +58,22 @@ test('config-coupled methods throw without an injected config provider', () => {
 test('dmPolicy sets policy through the config provider (updateConfig)', async () => {
   const { http } = makeClient([ok()]);
   const cfg = {
-    orgs: { acme: { slug: 'acme', org_id: 'o1', org_name: 'Acme', access: { dmPolicy: 'owner' } } },
+    orgs: { o1: { org_id: 'o1', org_name: 'Acme', access: { dmPolicy: 'owner' } } },
   };
   const config = {
-    enabledOrgs: () => [cfg.orgs.acme],
+    enabledOrgs: () => [cfg.orgs.o1],
     getOrgByOrgId: (id) => Object.values(cfg.orgs).find((o) => o.org_id === id),
     updateConfig: (fn) => { fn(cfg); return cfg; },
     setOwner: () => {},
   };
   const out = new CommService(http, config).dmPolicy({ policy: 'allowlist' });
   assert.deepEqual(out, { org: 'Acme', dmPolicy: 'allowlist', applied: true });
-  assert.equal(cfg.orgs.acme.access.dmPolicy, 'allowlist');
+  assert.equal(cfg.orgs.o1.access.dmPolicy, 'allowlist');
 });
 
 test('dmPolicy rejects an invalid policy', () => {
   const { http } = makeClient([ok()]);
-  const config = { enabledOrgs: () => [{ slug: 'acme', org_id: 'o1', access: {} }], updateConfig: (f) => f, setOwner: () => {} };
+  const config = { enabledOrgs: () => [{ org_id: 'o1', access: {} }], updateConfig: (f) => f, setOwner: () => {} };
   assert.throws(() => new CommService(http, config).dmPolicy({ policy: 'nope' }), /Invalid policy/);
 });
 
@@ -83,17 +83,17 @@ test('syncOwner reads self member then pulls + sets the authoritative owner', as
     ok({ display_name: 'Alice' }),                        // GET /members/owner-new
   ]);
   const setOwnerCalls = [];
-  const org = { slug: 'acme', org_id: 'o1', org_name: 'Acme', self: { member_id: 'self-1' }, owner: { member_id: 'owner-old' } };
+  const org = { org_id: 'o1', org_name: 'Acme', self: { member_id: 'self-1' }, owner: { member_id: 'owner-old' } };
   const config = {
     enabledOrgs: () => [org],
     getOrgByOrgId: () => undefined,
     updateConfig: (f) => f,
-    setOwner: (slug, id, name) => setOwnerCalls.push({ slug, id, name }),
+    setOwner: (orgId, id, name) => setOwnerCalls.push({ orgId, id, name }),
   };
   const out = await createCommService(http, config).syncOwner({});
   assert.equal(fetch.requests[0].path, '/api/v1/members/self-1');
   assert.equal(fetch.requests[1].path, '/api/v1/members/owner-new');
-  assert.deepEqual(setOwnerCalls, [{ slug: 'acme', id: 'owner-new', name: 'Alice' }]);
+  assert.deepEqual(setOwnerCalls, [{ orgId: 'o1', id: 'owner-new', name: 'Alice' }]);
   assert.equal(out.synced, true);
   assert.deepEqual(out.owner, { member_id: 'owner-new', name: 'Alice' });
 });

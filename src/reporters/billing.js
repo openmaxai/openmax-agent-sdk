@@ -147,14 +147,14 @@ export function shouldSendOverdueNotice(orgId, target, deps = {}) {
  * through the per-org authed cws-core client (getForOrg unwraps the D8
  * envelope; we also tolerate a non-unwrapped `body.data.agent_origin`).
  *
- * @param {{org_id?: string, self?: {member_id?: string}, slug?: string}} orgConfig
+ * @param {{org_id?: string, self?: {member_id?: string}}} orgConfig
  * @param {object} [deps]  test seam — { getForOrg, http, apiPath, warn, timeoutMs }.
  * @returns {Promise<'platform_created'|'external_invited'|null>}
  */
 export async function resolveAgentOrigin(orgConfig, deps = {}) {
   const orgId = orgConfig?.org_id;
   const warn = deps.warn || ((...a) => console.warn('[billing-status]', ...a));
-  const slug = orgConfig?.slug || orgId || '?';
+  const label = orgId || '?';
   const timeoutMs = Number.isInteger(deps.timeoutMs) ? deps.timeoutMs : AGENT_ORIGIN_TIMEOUT_MS;
 
   // Serve the permanent cache first (immutable origin).
@@ -162,7 +162,7 @@ export async function resolveAgentOrigin(orgConfig, deps = {}) {
 
   const memberId = orgConfig?.self?.member_id;
   if (!orgId || !memberId) {
-    warn(`[${slug}] cannot resolve agent origin: missing org_id or self.member_id`);
+    warn(`[${label}] cannot resolve agent origin: missing org_id or self.member_id`);
     return null;
   }
 
@@ -185,19 +185,19 @@ export async function resolveAgentOrigin(orgConfig, deps = {}) {
       clearTimeout(timer);
     }
     if (result === TIMED_OUT) {
-      warn(`[${slug}] member lookup for agent origin timed out after ${timeoutMs}ms, treating origin as unknown`);
+      warn(`[${label}] member lookup for agent origin timed out after ${timeoutMs}ms, treating origin as unknown`);
       return null; // NOT cached
     }
     body = result;
   } catch (err) {
     // Do NOT cache: retry on the next message until a definitive value lands.
-    warn(`[${slug}] member lookup for agent origin failed, treating origin as unknown: ${err?.message || err}`);
+    warn(`[${label}] member lookup for agent origin failed, treating origin as unknown: ${err?.message || err}`);
     return null;
   }
 
   const origin = body?.agent_origin ?? body?.data?.agent_origin ?? null;
   if (origin !== 'platform_created' && origin !== 'external_invited') {
-    warn(`[${slug}] agent_origin absent or unrecognized on member ${memberId}; treating origin as unknown`);
+    warn(`[${label}] agent_origin absent or unrecognized on member ${memberId}; treating origin as unknown`);
     return null;
   }
 
@@ -208,7 +208,7 @@ export async function resolveAgentOrigin(orgConfig, deps = {}) {
 /**
  * Is this org's LLM currently suspended for credit arrears?
  *
- * @param {{org_id?: string, self?: {member_id?: string}, slug?: string}} orgConfig
+ * @param {{org_id?: string, self?: {member_id?: string}}} orgConfig
  * @param {object} [deps]  test seam — { getForOrg, http, apiPath, now, ttlMs,
  *        timeoutMs, loadConfig, warn }.
  * @returns {Promise<boolean>}  true only when the agent is `platform_created`
@@ -223,7 +223,7 @@ export async function isOrgLLMSuspended(orgConfig, deps = {}) {
   const ttl = Number.isInteger(deps.ttlMs) ? deps.ttlMs : resolveTtlMs(deps.loadConfig);
   const timeoutMs = Number.isInteger(deps.timeoutMs) ? deps.timeoutMs : PLAN_STATE_TIMEOUT_MS;
   const warn = deps.warn || ((...a) => console.warn('[billing-status]', ...a));
-  const slug = orgConfig?.slug || orgId;
+  const label = orgId || '?';
 
   // Origin guard: resolve origin FIRST and fail open (allow through) unless it
   // is POSITIVELY platform_created. Threads the same getForOrg + apiPath + warn.
@@ -250,13 +250,13 @@ export async function isOrgLLMSuspended(orgConfig, deps = {}) {
       clearTimeout(timer);
     }
     if (result === TIMED_OUT) {
-      warn(`[${slug}] plan-state query timed out after ${timeoutMs}ms, treating as not suspended`);
+      warn(`[${label}] plan-state query timed out after ${timeoutMs}ms, treating as not suspended`);
       return false; // fail-open, NOT cached
     }
     body = result;
   } catch (err) {
     // FAIL-OPEN: never block a message because billing could not be queried.
-    warn(`[${slug}] plan-state query failed, treating as not suspended: ${err?.message || err}`);
+    warn(`[${label}] plan-state query failed, treating as not suspended: ${err?.message || err}`);
     return false;
   }
 

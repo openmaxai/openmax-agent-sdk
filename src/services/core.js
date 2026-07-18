@@ -76,14 +76,14 @@ export class CoreService {
       const orgs = this.config.enabledOrgs();
       if (orgs.length && typeof this.config.updateConfig === 'function') {
         this.config.updateConfig((cfg) => {
-          for (const { slug } of orgs) {
-            const org = cfg.orgs?.[slug];
+          for (const { org_id } of orgs) {
+            const org = cfg.orgs?.[org_id];
             if (!org) continue;
             org.self = { ...(org.self || {}), name };
           }
         });
       }
-      orgsSynced = orgs.map((o) => o.slug);
+      orgsSynced = orgs.map((o) => o.org_id);
     }
 
     return {

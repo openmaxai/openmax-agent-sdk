@@ -61,7 +61,10 @@
  *       baseUrl, reconnectMaxMs, heartbeatIntervalMs, pingIntervalMs,
  *       deviceId, clientVersion, cfAccess, wsFactory, urlProvider,
  *     },
- *     orgConfigs: [ { slug, org_id, org_name?, self, owner, access } ],
+ *     orgConfigs: [ { org_id, org_name?, self, owner, access } ],
+ *       // Orgs are keyed by their required `org_id` (UUID) everywhere — the
+ *       //  _orgs map, log labels, and the positional callback identity. There is
+ *       //  no separate per-org key; any legacy `slug` field is ignored.
  *     providers: { storage, runtimeState, inbound, logger },   // resolveProviders()
  *     callbacks: {          // adapter seams — all optional
  *       loadSession, saveSession,       // per-org sync cursor persistence
@@ -79,7 +82,7 @@
  *
  * Methods: `start(): Promise<void>` · `stop(): Promise<void>` ·
  *          `send(endpoint, content, opts?)` (outbound helper) ·
- *          `injectFrame(slug, frame)` (drive a frame through an org's pipeline —
+ *          `injectFrame(orgId, frame)` (drive a frame through an org's pipeline —
  *          used by tests and manual replay).
  */
 
@@ -185,7 +188,7 @@ export class CwsAgentBridge {
       });
     }
 
-    // slug → per-org runtime record ({ orgConfig, sessionRef, ledger, sync, ws,
+    // orgId → per-org runtime record ({ orgConfig, sessionRef, ledger, sync, ws,
     //   onFrame, handleIncomingMessage })
     this._orgs = new Map();
     this._liveOrgCount = 0;
@@ -304,8 +307,8 @@ export class CwsAgentBridge {
   #markRead(orgConfig, conversationId, seq) {
     if (!conversationId || !seq) return;
     this.http.postForOrg(orgConfig.org_id, this.#ap(`/conversations/${conversationId}/read`), { read_until_seq: seq })
-      .then(() => this.#log(`[${orgConfig.slug}] marked read conv=${conversationId} seq=${seq}`))
-      .catch(e => this.#warn(`[${orgConfig.slug}] mark-read failed conv=${conversationId}: ${e.message}`));
+      .then(() => this.#log(`[${orgConfig.org_id}] marked read conv=${conversationId} seq=${seq}`))
+      .catch(e => this.#warn(`[${orgConfig.org_id}] mark-read failed conv=${conversationId}: ${e.message}`));
   }
 
   // Polite refusal back to the sender for a policy drop with a userNotice. Pure
@@ -319,7 +322,7 @@ export class CwsAgentBridge {
         parent_id: String(msg.id),
       });
     } catch (e) {
-      this.#warn(`[${orgConfig.slug}] reject notice for msg=${msg.id} failed: ${e.message}`);
+      this.#warn(`[${orgConfig.org_id}] reject notice for msg=${msg.id} failed: ${e.message}`);
     }
   }
 
@@ -335,7 +338,7 @@ export class CwsAgentBridge {
       const notifId = notification?.id;
       const notifConv = notification?.conversation_id;
       const notifSender = notification?.sender_id;
-      this.#log(`[ws] [${orgConfig.slug}] message frame: id=${notifId || '<missing>'} conv=${notifConv || '<missing>'} sender=${notifSender || '?'}`);
+      this.#log(`[ws] [${orgConfig.org_id}] message frame: id=${notifId || '<missing>'} conv=${notifConv || '<missing>'} sender=${notifSender || '?'}`);
       if (!notifId || !notifConv) return;
 
       // RESERVE vs COMMIT (P1-1/P1-A). Dedupe + inbox-ledger + cursor/ack
@@ -353,7 +356,7 @@ export class CwsAgentBridge {
       // false ⇒ already committed OR an in-flight concurrent duplicate → do NOT
       // deliver again.
       if (!this.#dedupeReserve(notifId)) {
-        this.#log(`[ws] [${orgConfig.slug}] msg=${notifId} duplicate (committed or in-flight), skipping`);
+        this.#log(`[ws] [${orgConfig.org_id}] msg=${notifId} duplicate (committed or in-flight), skipping`);
         return;
       }
 
@@ -373,7 +376,7 @@ export class CwsAgentBridge {
           ? notification.seq
           : (detail?.inbox_seq ?? detail?.message?.inbox_seq ?? null);
         if (ledger && inboxSeq != null && ledger.has?.(inboxSeq)) {
-          this.#log(`[ws] [${orgConfig.slug}] msg=${notifId} inbox_seq=${inboxSeq} already recorded, skipping`);
+          this.#log(`[ws] [${orgConfig.org_id}] msg=${notifId} inbox_seq=${inboxSeq} already recorded, skipping`);
           this.#dedupeCommit(notifId);
           committed = true;
           return;
@@ -406,7 +409,7 @@ export class CwsAgentBridge {
           fetchMemberOwner: this.#fetchMemberOwner,
         });
         if (!decision.handle) {
-          this.#log(`drop [${orgConfig.slug}] msg=${msg.id}: ${decision.reason}`);
+          this.#log(`drop [${orgConfig.org_id}] msg=${msg.id}: ${decision.reason}`);
           // A policy reject is TERMINAL/consumed — the message will never enter
           // the runtime context and must not be redelivered forever, so COMMIT
           // the dedupe + ledger markers here (before posting the notice).
@@ -427,12 +430,12 @@ export class CwsAgentBridge {
         // config.json. The SDK never writes config itself.
         if (decision.bindOwnerHint) {
           const { memberId, displayName } = decision.bindOwnerHint;
-          this.#log(`bind owner (fallback, core had none) [${orgConfig.slug}] member_id=${memberId} name="${displayName}"`);
+          this.#log(`bind owner (fallback, core had none) [${orgConfig.org_id}] member_id=${memberId} name="${displayName}"`);
           orgConfig.owner = { member_id: memberId, name: displayName || '' };
-          this.callbacks.onOwnerBind?.(orgConfig.slug, memberId, displayName || '');
+          this.callbacks.onOwnerBind?.(orgConfig.org_id, memberId, displayName || '');
         } else if (decision.ownerNameHint) {
           orgConfig.owner = { ...(orgConfig.owner || {}), name: decision.ownerNameHint };
-          this.callbacks.onOwnerNameHint?.(orgConfig.slug, decision.ownerNameHint);
+          this.callbacks.onOwnerNameHint?.(orgConfig.org_id, decision.ownerNameHint);
         }
 
         // (8) normalize → deliver. The adapter's InboundDelivery does all C4 /
@@ -451,15 +454,15 @@ export class CwsAgentBridge {
         try {
           res = await this.providers.inbound.deliver(inbound, inbound.endpoint, inbound.priority);
         } catch (e) {
-          this.#warn(`[${orgConfig.slug}] inbound.deliver threw for msg=${inbound.messageId}: ${e.message} — NOT committing (dedupe/ledger/cursor released for redelivery)`);
+          this.#warn(`[${orgConfig.org_id}] inbound.deliver threw for msg=${inbound.messageId}: ${e.message} — NOT committing (dedupe/ledger/cursor released for redelivery)`);
           throw e;   // propagate: release claim (finally), let live-guard/sync retry
         }
         const ok = res?.ok === true;   // P1-B: ONLY a literal ok:true is success
-        this.#log(`deliver [${orgConfig.slug}] ${inbound.conversationType} ${inbound.conversationId} msg=${inbound.messageId} seq=${inbound.seq} ok=${ok}`);
+        this.#log(`deliver [${orgConfig.org_id}] ${inbound.conversationType} ${inbound.conversationId} msg=${inbound.messageId} seq=${inbound.seq} ok=${ok}`);
         if (!ok) {
           const cls = res?.failureClass ? ` failureClass=${res.failureClass}` : '';
           const retry = res?.retryAfterMs != null ? ` retryAfterMs=${res.retryAfterMs}` : '';
-          this.#warn(`[${orgConfig.slug}] inbound.deliver did not return {ok:true} for msg=${inbound.messageId}${cls}${retry} — NOT committing (dedupe/ledger/cursor released for redelivery)`);
+          this.#warn(`[${orgConfig.org_id}] inbound.deliver did not return {ok:true} for msg=${inbound.messageId}${cls}${retry} — NOT committing (dedupe/ledger/cursor released for redelivery)`);
           const err = new Error(`inbound delivery failed for msg=${inbound.messageId}`);
           if (res?.failureClass != null) err.failureClass = res.failureClass;
           if (res?.retryAfterMs != null) err.retryAfterMs = res.retryAfterMs;
@@ -502,7 +505,7 @@ export class CwsAgentBridge {
     });
     return {
       orgId: orgConfig.org_id,
-      orgSlug: orgConfig.slug,
+      orgSlug: orgConfig.org_id,   // deprecated alias of orgId (kept for consumers reading orgSlug)
       orgName: orgConfig.org_name,
       conversation: conv || { id: idStr(msg.conversation_id) },
       conversationId: idStr(msg.conversation_id),
@@ -530,7 +533,7 @@ export class CwsAgentBridge {
     return async (frame, kind) => {
       const payload = frame.payload || {};
       if (!kind) {
-        this.#warn(`[${orgConfig.slug}] unhandled system event: ${payload.event || '(unknown)'} conv=${payload.conversation_id || '?'}`);
+        this.#warn(`[${orgConfig.org_id}] unhandled system event: ${payload.event || '(unknown)'} conv=${payload.conversation_id || '?'}`);
         return;
       }
 
@@ -542,21 +545,21 @@ export class CwsAgentBridge {
         // "not for us" target check is protocol; persistence is the adapter's.
         const data = payload.data || {};
         if (data.agent_member_id && data.agent_member_id !== orgConfig.self?.member_id) {
-          this.#log(`[${orgConfig.slug}] config event ${payload.event} not for us (target=${data.agent_member_id}), skip`);
+          this.#log(`[${orgConfig.org_id}] config event ${payload.event} not for us (target=${data.agent_member_id}), skip`);
           return;
         }
         try { await this.callbacks.onConfigEvent?.(orgConfig, { event: payload.event, data, frame }); }
-        catch (e) { this.#warn(`[${orgConfig.slug}] onConfigEvent failed: ${e.message} — event not consumed, will retry on replay`); }
+        catch (e) { this.#warn(`[${orgConfig.org_id}] onConfigEvent failed: ${e.message} — event not consumed, will retry on replay`); }
         return;
       }
       if (kind === 'connection') {
         try { await this.callbacks.onConnectionEvent?.(orgConfig, frame); }
-        catch (e) { this.#warn(`[${orgConfig.slug}] onConnectionEvent: ${e.message}`); }
+        catch (e) { this.#warn(`[${orgConfig.org_id}] onConnectionEvent: ${e.message}`); }
         return;
       }
       if (kind === 'channel') {
         try { await this.callbacks.onChannelEvent?.(orgConfig, frame); }
-        catch (e) { this.#warn(`[${orgConfig.slug}] onChannelEvent: ${e.message}`); }
+        catch (e) { this.#warn(`[${orgConfig.org_id}] onChannelEvent: ${e.message}`); }
         return;
       }
 
@@ -564,7 +567,7 @@ export class CwsAgentBridge {
       const data = payload.data || {};
       const conversationId = payload.conversation_id || data.conversation_id;
       if (!conversationId) {
-        this.#warn(`[${orgConfig.slug}] system ${payload.event}: missing conversation_id, skip`);
+        this.#warn(`[${orgConfig.org_id}] system ${payload.event}: missing conversation_id, skip`);
         return;
       }
       const messageId = idStr(data.message_id || data.id || data.msg_id) || '';
@@ -575,7 +578,7 @@ export class CwsAgentBridge {
       // COMMITTED only after onSystemNotice resolves successfully (P1-3);
       // otherwise it is RELEASED so a re-sent frame retries on replay.
       if (!this.#dedupeReserve(dedupKey)) {
-        this.#log(`[${orgConfig.slug}] system ${kind} dedup msg=${messageId} (committed or in-flight)`);
+        this.#log(`[${orgConfig.org_id}] system ${kind} dedup msg=${messageId} (committed or in-flight)`);
         return;
       }
 
@@ -593,7 +596,7 @@ export class CwsAgentBridge {
           fetchMemberOwner: this.#fetchMemberOwner,
         });
         if (!decision.handle) {
-          this.#log(`drop [${orgConfig.slug}] system ${kind} msg=${messageId}: ${decision.reason}`);
+          this.#log(`drop [${orgConfig.org_id}] system ${kind} msg=${messageId}: ${decision.reason}`);
           // Policy drop is re-evaluated cheaply on each replay (mirrors the
           // original) — RELEASE the reservation (via finally), do not commit.
           return;
@@ -624,7 +627,7 @@ export class CwsAgentBridge {
           this.#dedupeCommit(dedupKey);
           committed = true;
         } catch (e) {
-          this.#warn(`[${orgConfig.slug}] onSystemNotice failed for ${kind} msg=${messageId}: ${e.message} — event not consumed, will retry on replay`);
+          this.#warn(`[${orgConfig.org_id}] onSystemNotice failed for ${kind} msg=${messageId}: ${e.message} — event not consumed, will retry on replay`);
         }
       } finally {
         if (!committed) this.#dedupeRelease(dedupKey);
@@ -634,18 +637,18 @@ export class CwsAgentBridge {
 
   // ── per-org WS lifecycle (port of startOrgWs) ────────────────────────────────
   async #startOrgWs(orgConfig) {
-    const slug = orgConfig.slug;
+    const orgId = orgConfig.org_id;
 
     // Session cursor: warm-restart from persisted sync_seq (migrate last_seq).
     let session = {};
     try {
-      session = (await this.callbacks.loadSession?.(slug)) || {};
+      session = (await this.callbacks.loadSession?.(orgId)) || {};
     } catch (e) {
-      this.#warn(`[${slug}] loadSession failed: ${e.message}`);
+      this.#warn(`[${orgId}] loadSession failed: ${e.message}`);
     }
     const syncSeq = session.sync_seq ?? session.last_seq ?? 0;
     const sessionRef = { sync_seq: syncSeq };
-    if (sessionRef.sync_seq) this.#log(`[${slug}] warm-restart: sync_seq=${sessionRef.sync_seq}`);
+    if (sessionRef.sync_seq) this.#log(`[${orgId}] warm-restart: sync_seq=${sessionRef.sync_seq}`);
 
     // SyncEngine — one per org, its onMessage bound to THIS org's pipeline so
     // /sync catch-up events flow through the same dedupe→policy→deliver path.
@@ -661,12 +664,12 @@ export class CwsAgentBridge {
     // Inbox-seq ledger — continuous-ack watermark + gap detection. onAck syncs
     // the session cursor + acks to cws-comm; onGapSync runs a /sync sweep. Wiring
     // order (ledger ← sync) mirrors comm-bridge startOrgWs exactly.
-    const ledger = createInboxLedger(slug, {
-      log: (...a) => this.#log(`[${slug}]`, ...a),
+    const ledger = createInboxLedger(orgId, {
+      log: (...a) => this.#log(`[${orgId}]`, ...a),
       storage: this.providers.storage,
       onAck: (ackedSeq) => {
         sessionRef.sync_seq = ackedSeq;
-        try { this.callbacks.saveSession?.(slug, { sync_seq: ackedSeq }); } catch {}
+        try { this.callbacks.saveSession?.(orgId, { sync_seq: ackedSeq }); } catch {}
         sync.ackSync(orgConfig, ackedSeq);
       },
       // #5: the ledger hands its durable acked_seq as the sweep FLOOR. Passing it
@@ -689,7 +692,7 @@ export class CwsAgentBridge {
     // replays ≤ this watermark are deduped by ledger.has() (bounded replay).
     const durableAcked = ledger.getAckedSeq?.() ?? 0;
     if (durableAcked > sessionRef.sync_seq) {
-      this.#log(`[${slug}] seeded sync_seq from ledger acked_seq=${durableAcked} (session cursor was ${sessionRef.sync_seq})`);
+      this.#log(`[${orgId}] seeded sync_seq from ledger acked_seq=${durableAcked} (session cursor was ${sessionRef.sync_seq})`);
       sessionRef.sync_seq = durableAcked;
     }
     ledger.start();
@@ -702,11 +705,11 @@ export class CwsAgentBridge {
       onMessage: (frame) => handleIncomingMessage(frame),
       onSystem,
       onFrameType: (type) => {
-        const k = `${slug}/${type || '(missing-type)'}`;
+        const k = `${orgId}/${type || '(missing-type)'}`;
         this._frameCounts[k] = (this._frameCounts[k] || 0) + 1;
-        this.callbacks.onFrameType?.(slug, type);
+        this.callbacks.onFrameType?.(orgId, type);
       },
-    }, { log: (...a) => this.#log(`[${slug}]`, ...a), warn: (...a) => this.#warn(`[${slug}]`, ...a) });
+    }, { log: (...a) => this.#log(`[${orgId}]`, ...a), warn: (...a) => this.#warn(`[${orgId}]`, ...a) });
 
     const wsBaseUrl = this.wsOpts.baseUrl;
     const urlProvider = this.wsOpts.urlProvider
@@ -717,9 +720,9 @@ export class CwsAgentBridge {
           // the one-shot ws-ticket and append it to the base URL.
           await this._hydrateSelfName(orgConfig, { maxAttempts: 1 });
           if (!this.tokenManager) throw new Error('no tokenManager to mint ws-ticket');
-          this.#log(`[ticket] org=${slug} requesting ws-ticket`);
+          this.#log(`[ticket] org=${orgId} requesting ws-ticket`);
           const ticket = await this.tokenManager.getWsTicket(orgConfig.org_id);
-          this.#log(`[ticket] org=${slug} got ws-ticket, connecting…`);
+          this.#log(`[ticket] org=${orgId} got ws-ticket, connecting…`);
           return `${wsBaseUrl}?ticket=${encodeURIComponent(ticket)}`;
         };
 
@@ -738,11 +741,11 @@ export class CwsAgentBridge {
         error: (...a) => this.logger.error?.(...a),
       },
       onOpen: async () => {
-        this.#log(`[ws] org=${slug} open (org_id=${orgConfig.org_id})`);
+        this.#log(`[ws] org=${orgId} open`);
         // Online self-report (onboarding trigger); best-effort, retried on
         // reconnect. Fired here, matching comm-bridge onOpen order.
         this._reportAgentOnline(orgConfig).catch(e =>
-          this.#warn(`[${slug}] online-report failed: ${e.message} — will retry on next reconnect`));
+          this.#warn(`[${orgId}] online-report failed: ${e.message} — will retry on next reconnect`));
         if (!sessionRef.sync_seq) {
           // First-ever connect: seek to inbox end, seed the ledger.
           await sync.initSyncSeq(orgConfig, sessionRef);
@@ -754,15 +757,15 @@ export class CwsAgentBridge {
       },
       onMessage: onFrame,
       onClose: (code, reason, willReconnect) => {
-        this.#log(`[${slug}] closed code=${code} reason="${reason || ''}" reconnect=${willReconnect}`);
+        this.#log(`[${orgId}] closed code=${code} reason="${reason || ''}" reconnect=${willReconnect}`);
         if (code === 4003) {
           // Session expired: drop cached JWT/ticket; keep sync_seq for catch-up.
-          this.#log(`[${slug}] session expired; invalidating token cache (sync_seq preserved)`);
+          this.#log(`[${orgId}] session expired; invalidating token cache (sync_seq preserved)`);
           this.tokenManager?.invalidate(orgConfig.org_id);
         }
       },
       onFatal: (code, reason) => {
-        this.logger.error?.(`[${slug}] FATAL close code=${code} reason="${reason || ''}" — stopping this org`);
+        this.logger.error?.(`[${orgId}] FATAL close code=${code} reason="${reason || ''}" — stopping this org`);
         this._liveOrgCount -= 1;
         this.callbacks.onOrgTerminated?.(orgConfig, code, reason);
         if (this._liveOrgCount <= 0) {
@@ -772,10 +775,10 @@ export class CwsAgentBridge {
       },
     });
 
-    this._orgs.set(slug, { orgConfig, sessionRef, ledger, sync, ws, onFrame, handleIncomingMessage });
+    this._orgs.set(orgId, { orgConfig, sessionRef, ledger, sync, ws, onFrame, handleIncomingMessage });
     this._liveOrgCount += 1;
     ws.start();
-    this.#log(`[${slug}] started (org=${orgConfig.org_id})`);
+    this.#log(`[${orgId}] started`);
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────────
@@ -797,9 +800,9 @@ export class CwsAgentBridge {
     // readiness land before the first frame. Each WS still re-runs the barrier in
     // its urlProvider, so a failed bootstrap does not block startup.
     await Promise.allSettled(this.orgConfigs.map(async (orgConfig) => {
-      this.#log(`[bootstrap] org=${orgConfig.slug} (${orgConfig.org_id}) acquiring JWT + hydrating self display_name…`);
+      this.#log(`[bootstrap] org=${orgConfig.org_id} acquiring JWT + hydrating self display_name…`);
       const res = await this._hydrateSelfName(orgConfig);
-      this.#log(`[bootstrap] org=${orgConfig.slug} self-name readiness: ready=${res.ready} source=${res.source}${res.displayName ? ` ("${res.displayName}")` : ''}`);
+      this.#log(`[bootstrap] org=${orgConfig.org_id} self-name readiness: ready=${res.ready} source=${res.source}${res.displayName ? ` ("${res.displayName}")` : ''}`);
     }));
 
     for (const orgConfig of this.orgConfigs) {
@@ -811,9 +814,9 @@ export class CwsAgentBridge {
 
   #armReporters() {
     if (this.reporterOpts.metricsEnabled) {
-      // Build an activeOrgConfigs map the metrics reporter expects (slug → cfg).
+      // Build an activeOrgConfigs map the metrics reporter expects (orgId → cfg).
       const activeOrgConfigs = new Map();
-      for (const [slug, rec] of this._orgs) activeOrgConfigs.set(slug, rec.orgConfig);
+      for (const [orgId, rec] of this._orgs) activeOrgConfigs.set(orgId, rec.orgConfig);
       const reportMetrics = createMetricsReporter(activeOrgConfigs, {
         http: this.http,
         runtimeState: this.providers.runtimeState,
@@ -859,7 +862,7 @@ export class CwsAgentBridge {
     for (const t of this._timers) { try { clearInterval(t); clearTimeout(t); } catch {} }
     this._timers = [];
     const flushes = [];
-    for (const [slug, rec] of this._orgs) {
+    for (const [orgId, rec] of this._orgs) {
       try { rec.ws.stop(); } catch {}
       // #4: flush the session sync cursor from the ledger's durable watermark
       // before shutdown, so a restart resumes from the last genuinely-consumed
@@ -868,7 +871,7 @@ export class CwsAgentBridge {
       // if saveSession is a no-op.
       try {
         const durable = Math.max(rec.sessionRef?.sync_seq || 0, rec.ledger.getAckedSeq?.() || 0);
-        if (durable > 0) this.callbacks.saveSession?.(slug, { sync_seq: durable });
+        if (durable > 0) this.callbacks.saveSession?.(orgId, { sync_seq: durable });
       } catch {}
       try { flushes.push(Promise.resolve(rec.ledger.stop())); } catch {}
     }
@@ -912,12 +915,12 @@ export class CwsAgentBridge {
   /**
    * Drive a raw frame through a started org's dispatcher — the same path a live
    * WS frame takes. Used by tests and manual replay; returns nothing.
-   * @param {string} slug
+   * @param {string} orgId
    * @param {object} frame
    */
-  injectFrame(slug, frame) {
-    const rec = this._orgs.get(slug);
-    if (!rec) throw new Error(`injectFrame: org "${slug}" not started`);
+  injectFrame(orgId, frame) {
+    const rec = this._orgs.get(orgId);
+    if (!rec) throw new Error(`injectFrame: org "${orgId}" not started`);
     rec.onFrame(frame);
   }
 }

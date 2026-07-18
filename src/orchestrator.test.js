@@ -71,7 +71,8 @@ function flush(n = 4) {
 
 function baseOrg(overrides = {}) {
   return {
-    slug: 'o1',
+    // No `slug` field — orgs are keyed by org_id end to end. The whole suite
+    // therefore runs org_id-only; see the dedicated legacy-slug-ignored test.
     org_id: 'org1',
     org_name: 'Org One',
     self: { member_id: 'self1', display_name: 'Bot' },
@@ -127,7 +128,7 @@ test('inbound message frame flows dedupe → normalize → access-policy → del
   const { bridge } = makeBridge({ http, orgConfigs: [baseOrg()], inbound });
   await bridge.start();
 
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
 
   assert.equal(delivered.length, 1, 'deliver called once');
@@ -141,11 +142,44 @@ test('inbound message frame flows dedupe → normalize → access-policy → del
   assert.match(d.msg.decision.reason, /dm:open/);
   assert.equal(d.endpoint, 'c1', 'endpoint formatted from the conversation');
   assert.ok(d.msg.message, 'raw merged frame passed through for the adapter');
+  assert.equal(d.msg.orgId, 'org1', 'inbound object carries orgId = org_id');
+  assert.equal(d.msg.orgSlug, 'org1', 'orgSlug is a deprecated alias of org_id');
 
   // Dedupe: re-injecting the same message id delivers nothing more.
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
   assert.equal(delivered.length, 1, 'duplicate message_id deduped');
+
+  await bridge.stop();
+});
+
+test('orgs are keyed by org_id end to end; a legacy `slug` field is ignored', async () => {
+  const { http } = makeHttp([
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1\/messages\/m1$/.test(u),
+      data: { id: 'm1', sender_id: 'u1', seq: 7, type: 'text', inbox_seq: 7,
+        content: { content_type: 'text', body: { text: 'hello' }, attachments: [] } } },
+    { match: (u, m) => m === 'GET' && /\/conversations\/c1$/.test(u),
+      data: { id: 'c1', type: 'dm', name: 'DM' } },
+  ]);
+  const delivered = [];
+  const inbound = { deliver: async (msg, endpoint) => { delivered.push({ msg, endpoint }); return { ok: true }; } };
+
+  // An org carrying a DIFFERENT, vestigial `slug` alongside its org_id. The SDK
+  // must key everything by org_id ('orgX') and completely ignore the slug.
+  const org = baseOrg({ org_id: 'orgX', slug: 'legacy-slug' });
+  const { bridge } = makeBridge({ http, orgConfigs: [org], inbound });
+  await bridge.start();
+
+  // Driving by org_id works…
+  bridge.injectFrame('orgX', msgFrame());
+  await flush();
+  assert.equal(delivered.length, 1, 'frame delivered when keyed by org_id');
+  assert.equal(delivered[0].msg.orgId, 'orgX');
+
+  // …and the legacy slug is NOT a valid key.
+  assert.throws(() => bridge.injectFrame('legacy-slug', msgFrame()),
+    /injectFrame: org "legacy-slug" not started/,
+    'the vestigial slug is not usable as an org key');
 
   await bridge.stop();
 });
@@ -169,7 +203,7 @@ test('access-policy rejection does NOT call deliver (and posts a reject notice)'
   const { bridge } = makeBridge({ http, orgConfigs: [org], inbound });
   await bridge.start();
 
-  bridge.injectFrame('o1', msgFrame({ sender_id: 'stranger' }));
+  bridge.injectFrame('org1', msgFrame({ sender_id: 'stranger' }));
   await flush();
 
   assert.equal(delivered.length, 0, 'rejected message never delivered');
@@ -278,7 +312,7 @@ test('system recall frame is policy-gated and handed to onSystemNotice (not deli
   });
   await bridge.start();
 
-  bridge.injectFrame('o1', {
+  bridge.injectFrame('org1', {
     type: 'system',
     payload: { event: 'message.recalled', conversation_id: 'c1', data: { message_id: 'm1', recalled_by: 'u1' } },
   });
@@ -318,17 +352,17 @@ test('P1-1(a,c,d): deliver {ok:false} is not deduped; redelivered on replay, the
   const { bridge } = makeBridge({ http, orgConfigs: [baseOrg()], inbound });
   await bridge.start();
 
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
   assert.equal(delivered.length, 1, 'first delivery attempted (returned ok:false)');
 
   // Replay same message-id: NOT deduped because the failed attempt never committed.
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
   assert.equal(delivered.length, 2, 'redelivered after the failed attempt (dedupe/ledger not committed)');
 
   // Third replay lands after the eventual success → deduped, no double-commit.
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
   assert.equal(delivered.length, 2, 'deduped after a successful delivery (single commit)');
 
@@ -347,11 +381,11 @@ test('P1-1(b): a thrown deliver() is not swallowed — not deduped, redelivered'
   const { bridge } = makeBridge({ http, orgConfigs: [baseOrg()], inbound });
   await bridge.start();
 
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
   assert.equal(delivered.length, 1, 'first attempt threw');
 
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
   assert.equal(delivered.length, 2, 'redelivered after a thrown deliver() (no swallow, no premature dedupe)');
 
@@ -374,7 +408,7 @@ test('P1-1: a failed delivery during /sync does NOT advance the sync cursor or a
     http, orgConfigs: [baseOrg()], inbound,
     callbacks: {
       loadSession: async () => ({ sync_seq: 5 }),
-      saveSession: (slug, partial) => saved.push(partial),
+      saveSession: (orgId, partial) => saved.push(partial),
     },
   });
   await bridge.start();
@@ -410,13 +444,13 @@ test('P1-1: a terminal policy reject DOES commit dedupe (consumed, not redeliver
   const { bridge } = makeBridge({ http, orgConfigs: [org], inbound });
   await bridge.start();
 
-  bridge.injectFrame('o1', msgFrame({ sender_id: 'stranger' }));
+  bridge.injectFrame('org1', msgFrame({ sender_id: 'stranger' }));
   await flush();
   assert.equal(delivered.length, 0, 'rejected message never delivered');
   assert.equal(rejectPosts, 1, 'one reject notice posted');
 
   // Replay: the reject was terminal/consumed → deduped → no second reject notice.
-  bridge.injectFrame('o1', msgFrame({ sender_id: 'stranger' }));
+  bridge.injectFrame('org1', msgFrame({ sender_id: 'stranger' }));
   await flush();
   assert.equal(rejectPosts, 1, 'policy reject committed dedupe — no re-processing on replay');
 
@@ -445,15 +479,15 @@ test('P1-3: rejecting onSystemNotice is caught, not deduped (retried), no unhand
       type: 'system',
       payload: { event: 'message.recalled', conversation_id: 'c1', data: { message_id: 'm1', recalled_by: 'u1' } },
     };
-    bridge.injectFrame('o1', recall);
+    bridge.injectFrame('org1', recall);
     await flush();
     assert.equal(calls, 1, 'onSystemNotice invoked and awaited');
 
-    bridge.injectFrame('o1', recall);
+    bridge.injectFrame('org1', recall);
     await flush();
     assert.equal(calls, 2, 'event NOT deduped after the rejecting callback — retried on replay');
 
-    bridge.injectFrame('o1', recall);
+    bridge.injectFrame('org1', recall);
     await flush();
     assert.equal(calls, 2, 'deduped after the notice eventually succeeded (single commit)');
 
@@ -484,12 +518,12 @@ test('P1-3: rejecting onConfigEvent is awaited + caught (no unhandledRejection),
       type: 'system',
       payload: { event: 'agent.config.dm_policy_changed', data: { agent_member_id: 'self1', policy: 'allowlist' } },
     };
-    bridge.injectFrame('o1', frame);
+    bridge.injectFrame('org1', frame);
     await flush();
     assert.equal(calls, 1, 'onConfigEvent invoked and awaited');
 
     // Config events are not consumed by a failed callback → retried on replay.
-    bridge.injectFrame('o1', frame);
+    bridge.injectFrame('org1', frame);
     await flush();
     assert.equal(calls, 2, 'config event retried after the rejecting callback');
 
@@ -520,8 +554,8 @@ test('P1-A: two concurrent handlers for the SAME message id deliver exactly once
   await bridge.start();
 
   // Fire the same message id twice back-to-back with NO await in between.
-  bridge.injectFrame('o1', msgFrame());
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
 
   assert.equal(delivered.length, 1, 'concurrent same-id claimed atomically → delivered exactly once');
@@ -548,8 +582,8 @@ test('P1-A: two concurrent system frames for the SAME event fire onSystemNotice 
     type: 'system',
     payload: { event: 'message.recalled', conversation_id: 'c1', data: { message_id: 'm1', recalled_by: 'u1' } },
   };
-  bridge.injectFrame('o1', recall);
-  bridge.injectFrame('o1', recall);
+  bridge.injectFrame('org1', recall);
+  bridge.injectFrame('org1', recall);
   await flush();
 
   assert.equal(notices.length, 1, 'concurrent same system event → onSystemNotice fired exactly once');
@@ -566,11 +600,11 @@ test('P1-A: a failed deliver releases the reservation → a later replay redeliv
   const { bridge } = makeBridge({ http, orgConfigs: [baseOrg()], inbound });
   await bridge.start();
 
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
   assert.equal(delivered.length, 1, 'first attempt failed (reservation released, not committed)');
 
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
   assert.equal(delivered.length, 2, 'reservation was released → replay re-reserved and redelivered');
 
@@ -594,13 +628,13 @@ test('P1-B: {}, undefined, {ok:"yes"}, {ok:1} are failures; only {ok:true} commi
   // Each malformed ack must NOT commit → the message is redelivered on replay,
   // right up until the literal {ok:true} (attempt 5) finally commits it.
   for (let i = 1; i <= 5; i++) {
-    bridge.injectFrame('o1', msgFrame());
+    bridge.injectFrame('org1', msgFrame());
     await flush();
     assert.equal(delivered.length, i, `attempt ${i}: non-true ack (${JSON.stringify(results[i - 1])}) redelivered`);
   }
 
   // A 6th replay after the {ok:true} commit is deduped — committed exactly once.
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
   assert.equal(delivered.length, 5, 'committed exactly once on {ok:true}; no redelivery afterwards');
 
@@ -624,7 +658,7 @@ test('P1-B: the /sync catch-up path also treats a malformed ack as failure (no c
     http, orgConfigs: [baseOrg()], inbound,
     callbacks: {
       loadSession: async () => ({ sync_seq: 5 }),
-      saveSession: (slug, partial) => saved.push(partial),
+      saveSession: (orgId, partial) => saved.push(partial),
     },
   });
   await bridge.start();
@@ -693,7 +727,7 @@ test('P1: the default (no custom dedupe) and a proper atomic dedupe both constru
     const inbound = { deliver: async (msg) => { delivered.push(msg); return { ok: true }; } };
     const bridge = newBridge({ http, orgConfigs: [baseOrg()], inbound });
     await bridge.start();
-    bridge.injectFrame('o1', msgFrame());
+    bridge.injectFrame('org1', msgFrame());
     await flush();
     assert.equal(delivered.length, 1, 'default deduper delivers');
     await bridge.stop();
@@ -706,10 +740,10 @@ test('P1: the default (no custom dedupe) and a proper atomic dedupe both constru
     const atomic = createDeduper();
     const bridge = newBridge({ http, orgConfigs: [baseOrg()], inbound, callbacks: { dedupe: atomic } });
     await bridge.start();
-    bridge.injectFrame('o1', msgFrame());
+    bridge.injectFrame('org1', msgFrame());
     await flush();
     assert.equal(delivered.length, 1, 'a supplied atomic deduper delivers');
-    bridge.injectFrame('o1', msgFrame());
+    bridge.injectFrame('org1', msgFrame());
     await flush();
     assert.equal(delivered.length, 1, 'and still dedupes a committed duplicate');
     await bridge.stop();
@@ -725,13 +759,13 @@ test('P1 (regression): default deduper {ok:false}-then-replay REDELIVERS (not pe
   const bridge = newBridge({ http, orgConfigs: [baseOrg()], inbound });
   await bridge.start();
 
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
   assert.equal(delivered.length, 1, 'first attempt returned {ok:false} (claim released, not committed)');
 
   // The whole point of the atomic-deduper requirement: a failed deliver must not
   // permanently suppress the id — the replay redelivers.
-  bridge.injectFrame('o1', msgFrame());
+  bridge.injectFrame('org1', msgFrame());
   await flush();
   assert.equal(delivered.length, 2, 'replay after {ok:false} REDELIVERED (retryable, not suppressed)');
 
@@ -748,7 +782,7 @@ test('config-update frame is handed to onConfigEvent (SDK does not persist)', as
   });
   await bridge.start();
 
-  bridge.injectFrame('o1', {
+  bridge.injectFrame('org1', {
     type: 'system',
     payload: { event: 'agent.config.dm_policy_changed', data: { agent_member_id: 'self1', policy: 'allowlist' } },
   });
@@ -782,7 +816,7 @@ test('#4: restart with a stale session cursor seeds sync_seq from the ledger ack
   // Durable ledger recorded acked_seq=5, but the 5s onAck tick never wrote the
   // session file before the restart → loadSession returns a stale sync_seq of 0.
   const storage = memoryStorage();
-  await storage.set('inbox-o1.json', JSON.stringify({ acked_seq: 5, received: [] }));
+  await storage.set('inbox-org1.json', JSON.stringify({ acked_seq: 5, received: [] }));
 
   const delivered = [];
   const inbound = { deliver: async (msg) => { delivered.push(msg); return { ok: true }; } };

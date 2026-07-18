@@ -26,7 +26,7 @@
   ],
   "properties": {
     "orgId": { "type": "string", "description": "orgConfig.org_id" },
-    "orgSlug": { "type": "string", "description": "orgConfig.slug" },
+    "orgSlug": { "type": "string", "description": "DEPRECATED alias of orgId (== orgConfig.org_id); kept for consumers still reading orgSlug" },
     "orgName": { "type": "string", "description": "orgConfig.org_name (omitted when the config has none)." },
     "conversation": {
       "type": "object",

@@ -37,14 +37,14 @@ import { createCgroupCollector } from './cgroup.js';
 /**
  * Resolve the PRIMARY org to self-report under: the first entry of the
  * insertion-ordered `activeOrgConfigs` Map (the first enabled org). Returns
- * `{ slug, orgConfig, selfMemberId }` (selfMemberId may be undefined when the
+ * `{ orgId, orgConfig, selfMemberId }` (selfMemberId may be undefined when the
  * primary org has no `self.member_id`), or `null` when no org is active.
  */
 export function selectPrimaryOrg(activeOrgConfigs) {
   const [primary] = activeOrgConfigs;
   if (!primary) return null;
-  const [slug, orgConfig] = primary;
-  return { slug, orgConfig, selfMemberId: orgConfig.self?.member_id };
+  const [orgId, orgConfig] = primary;
+  return { orgId, orgConfig, selfMemberId: orgConfig.self?.member_id };
 }
 
 /**
@@ -173,9 +173,9 @@ export function createMetricsReporter(activeOrgConfigs, {
       warn('no active org configured — runtime-metrics not reported');
       return;
     }
-    const { slug, orgConfig, selfMemberId } = primary;
+    const { orgId, orgConfig, selfMemberId } = primary;
     if (!selfMemberId) {
-      warn(`[${slug}] primary org has no self.member_id — runtime-metrics not reported`);
+      warn(`[${orgId}] primary org has no self.member_id — runtime-metrics not reported`);
       return;
     }
     try {
@@ -183,11 +183,11 @@ export function createMetricsReporter(activeOrgConfigs, {
     } catch (err) {
       if (err.status === 404) {
         if (!warnedEndpoint404) {
-          warn(`[${slug}] runtime-metrics endpoint not available (404), skipping`);
+          warn(`[${orgId}] runtime-metrics endpoint not available (404), skipping`);
           warnedEndpoint404 = true;
         }
       } else {
-        warn(`[${slug}] metrics report failed: ${err.message}`);
+        warn(`[${orgId}] metrics report failed: ${err.message}`);
       }
     }
   };

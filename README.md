@@ -46,7 +46,7 @@ const bridge = new CwsAgentBridge({
   http,                       // CwsHttpClient
   tokenManager,               // TokenManager (mints ws-tickets; optional in tests)
   ws: { baseUrl, reconnectMaxMs, heartbeatIntervalMs, pingIntervalMs, deviceId, clientVersion },
-  orgConfigs,                 // [{ slug, org_id, self, owner, access }]
+  orgConfigs,                 // [{ org_id, self, owner, access }] — orgs are keyed by org_id
   providers: { storage, runtimeState, inbound, logger },   // inbound is the required seam
   callbacks: { /* adapter seams, all optional — see below */ },
   reporters: { metrics, metricsIntervalMs, version },

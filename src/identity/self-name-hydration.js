@@ -53,11 +53,11 @@ export function createSelfNameHydrator({
   maxAttempts: defaultMaxAttempts = 3,
   retryDelayMs: defaultRetryDelayMs = 2000,
 }) {
-  const synced = new Set(); // org slugs with a successful authoritative sync this process
+  const synced = new Set(); // org ids with a successful authoritative sync this process
 
   return async function hydrateSelfName(orgConfig, { maxAttempts = defaultMaxAttempts, retryDelayMs = defaultRetryDelayMs } = {}) {
-    const slug = orgConfig.slug;
-    if (synced.has(slug)) {
+    const orgId = orgConfig.org_id;
+    if (synced.has(orgId)) {
       return { ready: true, source: 'already', displayName: orgConfig.self?.display_name || '' };
     }
 
@@ -68,7 +68,7 @@ export function createSelfNameHydrator({
       try {
         await acquireToken(orgConfig);
       } catch (err) {
-        warn(`[${slug}] self-name hydrate: JWT acquire failed (attempt ${attempt}/${maxAttempts}): ${err.message}`);
+        warn(`[${orgId}] self-name hydrate: JWT acquire failed (attempt ${attempt}/${maxAttempts}): ${err.message}`);
       }
 
       // (2) Fresh install: token.exchange writes member_id back through
@@ -76,7 +76,7 @@ export function createSelfNameHydrator({
       // orgConfig never sees it. Re-resolve from live config and backfill in
       // place (same pattern as online-report.js).
       if (!orgConfig.self?.member_id) {
-        const liveMemberId = loadConfig().orgs?.[slug]?.self?.member_id || '';
+        const liveMemberId = loadConfig().orgs?.[orgId]?.self?.member_id || '';
         if (liveMemberId) orgConfig.self = { ...(orgConfig.self || {}), member_id: liveMemberId };
       }
 
@@ -85,14 +85,14 @@ export function createSelfNameHydrator({
       try {
         const res = await syncSelf(orgConfig);
         if (res?.nameReady) {
-          synced.add(slug);
+          synced.add(orgId);
           const displayName = orgConfig.self?.display_name || '';
-          log(`[${slug}] self display_name ready before connect${displayName ? ` ("${displayName}")` : ' (core reports no display_name — matching uses configured self.name)'}`);
+          log(`[${orgId}] self display_name ready before connect${displayName ? ` ("${displayName}")` : ' (core reports no display_name — matching uses configured self.name)'}`);
           return { ready: true, source: 'core', displayName };
         }
-        warn(`[${slug}] self-name hydrate attempt ${attempt}/${maxAttempts} not ready: ${res?.reason || 'unknown'}`);
+        warn(`[${orgId}] self-name hydrate attempt ${attempt}/${maxAttempts} not ready: ${res?.reason || 'unknown'}`);
       } catch (err) {
-        warn(`[${slug}] self-name hydrate attempt ${attempt}/${maxAttempts} failed: ${err.message}`);
+        warn(`[${orgId}] self-name hydrate attempt ${attempt}/${maxAttempts} failed: ${err.message}`);
       }
 
       if (attempt < maxAttempts) {
@@ -104,10 +104,10 @@ export function createSelfNameHydrator({
     // Bounded fallback — do not deadlock the connection on a core outage.
     const cached = orgConfig.self?.display_name || '';
     if (cached) {
-      warn(`[${slug}] self-name hydrate exhausted ${maxAttempts} attempt(s) — proceeding with cached last-known display_name "${cached}"; next reconnect / periodic sync retries`);
+      warn(`[${orgId}] self-name hydrate exhausted ${maxAttempts} attempt(s) — proceeding with cached last-known display_name "${cached}"; next reconnect / periodic sync retries`);
       return { ready: true, source: 'cache', displayName: cached };
     }
-    warn(`[${slug}] SELF-NAME NOT HYDRATED after ${maxAttempts} attempt(s) and no cached display_name — plain-text @-mentions match only the configured self.name until the next reconnect / periodic owner-sync succeeds`);
+    warn(`[${orgId}] SELF-NAME NOT HYDRATED after ${maxAttempts} attempt(s) and no cached display_name — plain-text @-mentions match only the configured self.name until the next reconnect / periodic owner-sync succeeds`);
     return { ready: false, source: 'none', displayName: '' };
   };
 }

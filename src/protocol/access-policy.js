@@ -124,7 +124,7 @@ export const NOTICE_GROUP_SENDER_NOT_ALLOWED =
  *
  * @param {object} msg        inbound message frame / detail
  * @param {object} conv       conversation record ({type, name, ...})
- * @param {object} orgConfig  per-org config ({self, owner, access, org_id, slug})
+ * @param {object} orgConfig  per-org config ({self, owner, access, org_id})
  * @param {object} [deps]
  * @param {(orgId:string, memberId:string) => Promise<string|null>} [deps.fetchMemberOwner]
  *        cws-core owner lookup used by the sibling-agent exemption. Defaults to

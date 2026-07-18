@@ -32,7 +32,7 @@
  * Side-effect on first exchange: when an org-scoped JWT comes back, we decode
  * the `member_id` claim and surface it via the injected `onMemberId(orgId,
  * memberId)` callback. In zylos-openmax this wrote back into
- * `config.orgs[slug].self.member_id`; that config mutation is now the adapter's
+ * `config.orgs[org_id].self.member_id`; that config mutation is now the adapter's
  * responsibility (SDK just reports the decoded id).
  *
  * Extraction notes (Zylos coupling removed):
