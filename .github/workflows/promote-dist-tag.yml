@@ -1,0 +1,62 @@
+name: Promote dist-tag
+
+# Manually move an npm dist-tag (e.g. `latest`) onto an already-published
+# version, without a local npm login. Uses the same NPM_TOKEN secret and the
+# same protected `release` environment as publishing, so every tag move needs a
+# reviewer approval — a dist-tag move is a distribution change and gets the same
+# gate as a publish.
+#
+# Motivating case: the first publish (0.1.0-alpha.0) forced npm's `latest` tag
+# onto itself; later alphas correctly went to the `alpha` tag, leaving `latest`
+# stranded on the pre-org_id-refactor contract. This lets us promote `latest`
+# onto the current good alpha from CI.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published version the dist-tag should point at (e.g. 0.1.0-alpha.2)'
+        required: true
+      dist_tag:
+        description: 'dist-tag to move (e.g. latest)'
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: Promote dist-tag on npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Same protected environment as `release.yml` publish → required-reviewer gate.
+    environment: release
+    steps:
+      # Pinned to a full commit SHA (immutable) — this job carries the npm token.
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify the target version is already published
+        run: |
+          set -euo pipefail
+          PKG="@openmaxai/openmax-agent-sdk"
+          if ! npm view "${PKG}@${{ inputs.version }}" version >/dev/null 2>&1; then
+            echo "::error::${PKG}@${{ inputs.version }} is not published — refusing to point a dist-tag at a non-existent version."
+            exit 1
+          fi
+          echo "OK: ${PKG}@${{ inputs.version }} exists."
+
+      - name: Move dist-tag
+        run: |
+          set -euo pipefail
+          PKG="@openmaxai/openmax-agent-sdk"
+          echo "Moving dist-tag '${{ inputs.dist_tag }}' -> ${PKG}@${{ inputs.version }}"
+          npm dist-tag add "${PKG}@${{ inputs.version }}" "${{ inputs.dist_tag }}"
+          echo "--- dist-tags now ---"
+          npm dist-tag ls "${PKG}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
