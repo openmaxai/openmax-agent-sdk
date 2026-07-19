@@ -64,10 +64,33 @@ jobs:
 
       - name: Publish to npm
         run: |
-          # prerelease versions (contain a hyphen, e.g. 0.1.0-alpha.0) publish to
-          # the `alpha` dist-tag so they never become `latest`; stable -> `latest`.
+          set -euo pipefail
+          PKG="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          # prerelease versions (contain a hyphen, e.g. 0.1.0-alpha.3) publish to
+          # the `alpha` dist-tag; stable versions publish to `latest`.
           DIST_TAG="$(node -p "require('./package.json').version.includes('-') ? 'alpha' : 'latest'")"
-          echo "publishing with dist-tag: $DIST_TAG"
+          echo "publishing $PKG@$VERSION with dist-tag: $DIST_TAG"
           npm publish --provenance --access public --tag "$DIST_TAG"
+
+          # Pre-stable convenience: while NO stable (non-prerelease) version has
+          # ever been published, also point `latest` at each new prerelease. This
+          # keeps a bare `npm install $PKG` (no tag) resolving the newest alpha,
+          # instead of being stranded on the first-published version (npm forces
+          # `latest` onto the very first publish). As soon as a stable ships,
+          # `latest` tracks stable and prereleases stop touching it — so this
+          # block no-ops from then on.
+          if [ "$DIST_TAG" = "alpha" ]; then
+            HAS_STABLE="$(npm view "$PKG" versions --json 2>/dev/null \
+              | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{let vs;try{vs=JSON.parse(d)}catch{vs=[]};vs=Array.isArray(vs)?vs:[vs];process.stdout.write(vs.some(v=>!String(v).includes('-'))?'yes':'no')})")"
+            if [ "$HAS_STABLE" = "no" ]; then
+              echo "no stable published yet -> promoting latest -> $VERSION"
+              npm dist-tag add "$PKG@$VERSION" latest
+            else
+              echo "a stable version exists -> leaving latest untouched"
+            fi
+            echo "--- dist-tags now ---"
+            npm dist-tag ls "$PKG"
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
