@@ -6,7 +6,19 @@ CWS agent runtime SDK — the **cws-comm protocol layer** extracted from `zylos-
 
 > Design: `协议归协议、runtime 归 runtime`. This package is **Layer 1** (shared protocol) *for Node*. Runtime-specific bridging lives in thin **Layer 2** adapter repos (`*-openmax`) that import this SDK. Mirrors the `@coco-xyz/hxa-connect-sdk` + adapter precedent.
 
-## Scope
+## Installation
+
+```bash
+npm i @openmaxai/openmax-agent-sdk@alpha
+```
+
+> **Install with the `@alpha` tag while the SDK is pre-1.0 — do not install untagged.**
+> There is no stable release yet, and the npm `latest` dist-tag currently points at
+> the very first alpha (`0.1.0-alpha.0`), which predates the `org_id` refactor (#12)
+> and the `message.id` fix (#3). A bare `npm i @openmaxai/openmax-agent-sdk` (no tag)
+> would silently resolve that stale contract. Always use `@alpha` (or pin an exact
+> `0.1.0-alpha.N`) until the first stable is published — at which point `latest` will
+> track stable.
 
 **In the SDK** (generic CWS + agent-level concerns):
 
