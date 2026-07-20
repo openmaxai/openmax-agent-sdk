@@ -16,6 +16,9 @@ npm i @openmaxai/openmax-agent-sdk
 > resolves it via the `latest` dist-tag. Pre-1.0 alphas remain available under the
 > `alpha` dist-tag for history.
 
+> Cutting a new version? See **[`RELEASING.md`](./RELEASING.md)** for the exact
+> files to bump and the release flow.
+
 **In the SDK** (generic CWS + agent-level concerns):
 
 - **transport/** — `WsClient` (auth, heartbeat, client keepalive-ping + frame-watchdog, exponential-backoff reconnect, 4001–4006 close-code handling), HTTP client (native `fetch` + auth), CF-Access headers, token/identity management.
