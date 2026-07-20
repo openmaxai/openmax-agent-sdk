@@ -142,6 +142,9 @@ export function createMentionRegistry({
     for (const name of namesList) {
       const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       // `@` + the name (case-insensitive); rewrite to the canonical `@<exact>`.
+      // False positive: `esc` is the regex-metachar-escaped name (line above), so the
+      // pattern is a literal `@name` — linear, no ReDoS. Lead-approved.
+      // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
       out = out.replace(new RegExp('@' + esc, 'gi'), '@' + name);
     }
     return out;
