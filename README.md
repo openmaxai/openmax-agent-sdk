@@ -9,16 +9,12 @@ CWS agent runtime SDK — the **cws-comm protocol layer** extracted from `zylos-
 ## Installation
 
 ```bash
-npm i @openmaxai/openmax-agent-sdk@alpha
+npm i @openmaxai/openmax-agent-sdk
 ```
 
-> **Install with the `@alpha` tag while the SDK is pre-1.0 — do not install untagged.**
-> There is no stable release yet, and the npm `latest` dist-tag currently points at
-> the very first alpha (`0.1.0-alpha.0`), which predates the `org_id` refactor (#12)
-> and the `message.id` fix (#3). A bare `npm i @openmaxai/openmax-agent-sdk` (no tag)
-> would silently resolve that stale contract. Always use `@alpha` (or pin an exact
-> `0.1.0-alpha.N`) until the first stable is published — at which point `latest` will
-> track stable.
+> **`1.0.0` is the first stable release.** A bare `npm i @openmaxai/openmax-agent-sdk`
+> resolves it via the `latest` dist-tag. Pre-1.0 alphas remain available under the
+> `alpha` dist-tag for history.
 
 **In the SDK** (generic CWS + agent-level concerns):
 
@@ -97,4 +93,4 @@ This package targets **Node.js only** (see `engines.node >= 20`). It is not publ
 
 ## Status
 
-`0.1.0-alpha.0` — **Phase A extraction complete**: transport, protocol, sync, services (tm/kb/as/comm/core/conn), reporters (agent-level), identity, and the `CwsAgentBridge` orchestrator, plus the **canonical `schemas/v1/` + `fixtures/v1/` protocol contract** with a self-verifying conformance test — **full suite green via `node --test`, 0 coupling to Zylos internals**. Next: Phase B — refactor `zylos-openmax` to consume this SDK, then int→prod parity verification (WS keepalive/watchdog focus). See the design doc for the full module map, cut line, wake contract, and migration phasing.
+`1.0.0` — **first stable release. Phase A extraction complete**: transport, protocol, sync, services (tm/kb/as/comm/core/conn), reporters (agent-level), identity, and the `CwsAgentBridge` orchestrator, plus the **canonical `schemas/v1/` + `fixtures/v1/` protocol contract** with a self-verifying conformance test — **full suite green via `node --test`, 0 coupling to Zylos internals**. Next: Phase B — refactor `zylos-openmax` to consume this SDK, then int→prod parity verification (WS keepalive/watchdog focus). See the design doc for the full module map, cut line, wake contract, and migration phasing.

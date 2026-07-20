@@ -4,6 +4,8 @@
  * Scaffold. Modules are re-exported here as they are extracted from
  * zylos-openmax (Phase A). Current tranche: providers.
  */
+import { createRequire } from 'node:module';
+
 export * from './providers.js';
 
 // ── transport layer (Phase A · milestone 1) ─────────────────────────────────
@@ -68,4 +70,5 @@ export * from './identity/self-name-hydration.js';   // createSelfNameHydrator
 // CLI shells) stays in the adapter behind the injected providers/callbacks.
 export * from './orchestrator.js';   // CwsAgentBridge
 
-export const SDK_VERSION = '0.1.0-alpha.0';
+// Sourced from package.json so it never drifts from the released version.
+export const SDK_VERSION = createRequire(import.meta.url)('../package.json').version;
