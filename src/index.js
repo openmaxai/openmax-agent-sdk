@@ -4,8 +4,6 @@
  * Scaffold. Modules are re-exported here as they are extracted from
  * zylos-openmax (Phase A). Current tranche: providers.
  */
-import { createRequire } from 'node:module';
-
 export * from './providers.js';
 
 // ── transport layer (Phase A · milestone 1) ─────────────────────────────────
@@ -70,5 +68,10 @@ export * from './identity/self-name-hydration.js';   // createSelfNameHydrator
 // CLI shells) stays in the adapter behind the injected providers/callbacks.
 export * from './orchestrator.js';   // CwsAgentBridge
 
-// Sourced from package.json so it never drifts from the released version.
-export const SDK_VERSION = createRequire(import.meta.url)('../package.json').version;
+// Hardcoded literal, NOT a runtime read of package.json. A `createRequire(...)
+// ('../package.json')` here does not survive bundling: when a consumer inlines
+// the SDK into a self-contained artifact, that call is preserved and resolves
+// `../package.json` relative to the CONSUMER's bundle at runtime — which fails
+// when the bundle is loaded in isolation. The `SDK_VERSION` test asserts this
+// literal stays in sync with package.json, so it can never silently drift.
+export const SDK_VERSION = '1.0.1';
