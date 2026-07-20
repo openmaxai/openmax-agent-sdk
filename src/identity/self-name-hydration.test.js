@@ -35,6 +35,9 @@ function mentionedInText(msg, selfName) {
   if (!selfName) return false;
   const text = msg.content?.body?.text || '';
   const escaped = selfName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // False positive (test helper): `escaped` is regex-metachar-escaped, so the
+  // pattern is linear — no ReDoS. Lead-approved.
+  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
   return new RegExp('@' + escaped + '(?![\\w-])', 'i').test(text);
 }
 

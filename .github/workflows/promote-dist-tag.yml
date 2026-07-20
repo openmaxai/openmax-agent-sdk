@@ -41,22 +41,29 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Verify the target version is already published
+        # Pass workflow inputs via env (not inline ${{ }}) so they reach the
+        # shell as data, never as script text — no run-shell-injection surface.
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           PKG="@openmaxai/openmax-agent-sdk"
-          if ! npm view "${PKG}@${{ inputs.version }}" version >/dev/null 2>&1; then
-            echo "::error::${PKG}@${{ inputs.version }} is not published — refusing to point a dist-tag at a non-existent version."
+          if ! npm view "${PKG}@${VERSION}" version >/dev/null 2>&1; then
+            echo "::error::${PKG}@${VERSION} is not published — refusing to point a dist-tag at a non-existent version."
             exit 1
           fi
-          echo "OK: ${PKG}@${{ inputs.version }} exists."
+          echo "OK: ${PKG}@${VERSION} exists."
 
       - name: Move dist-tag
+        # Inputs via env (not inline ${{ }}) — no run-shell-injection surface.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          DIST_TAG: ${{ inputs.dist_tag }}
         run: |
           set -euo pipefail
           PKG="@openmaxai/openmax-agent-sdk"
-          echo "Moving dist-tag '${{ inputs.dist_tag }}' -> ${PKG}@${{ inputs.version }}"
-          npm dist-tag add "${PKG}@${{ inputs.version }}" "${{ inputs.dist_tag }}"
+          echo "Moving dist-tag '${DIST_TAG}' -> ${PKG}@${VERSION}"
+          npm dist-tag add "${PKG}@${VERSION}" "${DIST_TAG}"
           echo "--- dist-tags now ---"
           npm dist-tag ls "${PKG}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

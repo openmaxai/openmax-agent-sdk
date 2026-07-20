@@ -90,6 +90,9 @@ export function isSelfNameMentionedInText(msg, selfName) {
   if (!text) return false;
   const escaped = selfName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // `(?![\w-])` keeps "@Zylos" from matching "@Zylos-GavinBox" or "@ZylosX".
+  // False positive: `escaped` is the regex-metachar-escaped selfName (line above),
+  // so the pattern is a literal `@name` + fixed lookahead — linear, no ReDoS. Lead-approved.
+  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
   return new RegExp('@' + escaped + '(?![\\w-])', 'i').test(text);
 }
 
