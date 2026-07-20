@@ -1,0 +1,25 @@
+name: SAST
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # OSS mode only: the official Semgrep container runs the free CLI. No
+    # SEMGREP_APP_TOKEN and no `semgrep ci` (both require the paid platform).
+    container:
+      image: semgrep/semgrep:1.150.0
+    steps:
+      # Pinned to a full commit SHA, matching the repo convention.
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Semgrep scan (OSS)
+        run: semgrep scan --config auto --error --disable-version-check
