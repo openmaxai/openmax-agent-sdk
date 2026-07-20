@@ -24,6 +24,17 @@
  * likewise lives behind the injected StorageProvider under keys
  * `tokens/<org_id|_identity>.json`.
  *
+ * api_key binding: the cache key is org-only, but a JWT is minted from a
+ * specific api_key. If the api_key changes while the org stays the same (common
+ * in testing: swapping identity within one org), a purely org-keyed cache would
+ * hand back a STALE JWT minted from the OLD api_key — the agent would then
+ * authenticate as the wrong identity. To prevent that, every persisted record
+ * carries `apiKeyFp = sha256(api_key).slice(0,8)`; on load we compare it against
+ * the current api_key's fingerprint and treat a mismatch (or a legacy record
+ * with no fingerprint) as a cache miss, forcing a fresh exchange. This keeps a
+ * single self-healing file per org (no orphaned `<org>-<fp>.json` files). The
+ * fingerprint is a hash, never the api_key itself, so it is safe to log.
+ *
  * Inflight Promise dedup: concurrent callers asking for the same org's JWT
  * share a single in-flight HTTP request — important on boot when N orgs spin
  * up at once and again when a CLI fan-outs several calls before the cache
@@ -48,6 +59,7 @@
  * (matching the source).
  */
 
+import { createHash } from 'node:crypto';
 import { cfAccessHeaders } from './cf-access.js';
 import { memoryStorage } from '../providers.js';
 
@@ -115,6 +127,16 @@ function toMs(val) {
   return new Date(val).getTime() || 0;
 }
 
+/**
+ * Short, non-reversible fingerprint of an api_key, used to bind a cached token
+ * to the key that minted it. Returns '' when there is no api_key to fingerprint.
+ * Never derived from (nor derives) the token; safe to log at debug level.
+ */
+function apiKeyFingerprint(apiKey) {
+  if (!apiKey) return '';
+  return createHash('sha256').update(String(apiKey)).digest('hex').slice(0, 8);
+}
+
 /** Decode JWT claims (no signature check — for member_id extraction only). */
 function decodeJwtClaims(jwt) {
   try {
@@ -178,6 +200,31 @@ export class TokenManager {
   _resolveOrgId(orgId) {
     if (orgId) return orgId;
     return this._resolveDefaultOrgId();
+  }
+
+  // ── api_key binding (stale-JWT / wrong-identity guard) ───────────────────────
+  /** Fingerprint of the currently configured api_key (''' if none). */
+  _currentFp() {
+    return apiKeyFingerprint(this._resolveApiKey());
+  }
+
+  /**
+   * Is a cached token record still usable for the current api_key? A record is
+   * valid only when its stored fingerprint matches the current api_key's. A
+   * mismatch means the api_key changed (the JWT belongs to a different identity);
+   * a legacy record with no `apiKeyFp` predates this binding and is treated as a
+   * miss so it is safely re-exchanged. When no api_key is configured we cannot
+   * compare, so we leave the record as-is (a downstream exchange fails loudly).
+   */
+  _cacheValidForApiKey(state) {
+    if (!state) return false;
+    const fp = this._currentFp();
+    if (!fp) return true;                 // no api_key to compare against
+    if (state.apiKeyFp === fp) return true;
+    this._logger.error(
+      `${LOG} api_key changed (record fp=${state.apiKeyFp ?? '(none)'} != current fp=${fp}); discarding cached token`,
+    );
+    return false;
   }
 
   // ── inflight dedup ──────────────────────────────────────────────────────────
@@ -318,6 +365,7 @@ export class TokenManager {
         access_token_expires_at:  toMs(d.access_token_expires_at),
         refresh_token:            d.refresh_token,
         refresh_token_expires_at: toMs(d.refresh_token_expires_at),
+        apiKeyFp:                 apiKeyFingerprint(apiKey),
       };
       this._stateByOrg.set(oid, state);
       await this._writeDisk(oid, state);
@@ -331,6 +379,10 @@ export class TokenManager {
     const oid = orgIdArg || '';
     return this._withInflight(`refresh:${oid}`, async () => {
       let s = this._stateByOrg.get(oid) || await this._readDisk(oid);
+      // A token minted from a different api_key (or a pre-binding legacy record)
+      // must not be refreshed — the refresh_token itself belongs to the old
+      // identity. Fall through to a fresh exchange with the current api_key.
+      if (s && !this._cacheValidForApiKey(s)) s = null;
       if (!s?.refresh_token) return this.exchange(oid);
       try {
         const body = oid ? { refresh_token: s.refresh_token, org_id: oid }
@@ -343,6 +395,7 @@ export class TokenManager {
           access_token_expires_at:  toMs(d.access_token_expires_at),
           refresh_token:            d.refresh_token ?? s.refresh_token,
           refresh_token_expires_at: toMs(d.refresh_token_expires_at) || s.refresh_token_expires_at,
+          apiKeyFp:                 this._currentFp(),
         };
         this._stateByOrg.set(oid, state);
         await this._writeDisk(oid, state);
@@ -367,8 +420,16 @@ export class TokenManager {
   async getAccessToken(orgIdArg) {
     const oid = orgIdArg || '';
     let s = this._stateByOrg.get(oid);
+    // Drop an in-memory record minted from a now-changed api_key.
+    if (s && !this._cacheValidForApiKey(s)) {
+      this._stateByOrg.delete(oid);
+      s = null;
+    }
     if (!s) {
       s = await this._readDisk(oid);
+      // A persisted record from a different api_key (or a legacy record with no
+      // fingerprint) is a cache miss → fall through to refresh/exchange.
+      if (s && !this._cacheValidForApiKey(s)) s = null;
       if (s) this._stateByOrg.set(oid, s);
     }
     const now = Date.now();

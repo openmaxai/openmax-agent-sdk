@@ -133,6 +133,81 @@ test('exchange throws when no api_key is configured', async () => {
   await assert.rejects(() => tm.exchange(''), /api_key not set/);
 });
 
+// ── api_key binding: cache is scoped to the api_key that minted the JWT ─────────
+// The disk cache key is org-only (`tokens/<org>.json`). Before this binding, a
+// JWT minted from api_key A was reused verbatim after the config swapped to
+// api_key B for the SAME org — the agent then authenticated as the wrong
+// identity. Each record now stores `apiKeyFp`; a mismatch (or a legacy record
+// with no fp) is a cache miss that forces a fresh exchange.
+
+test('same api_key reuses the persisted token across a fresh TokenManager (no re-exchange)', async () => {
+  const storage = memoryStorage();
+  let exchanges = 0;
+  const fetch = fakeFetch(() => {
+    exchanges += 1;
+    return { json: { data: { access_token: `AT${exchanges}`, access_token_expires_at: FUTURE, refresh_token: 'R' } } };
+  });
+  const mk = () => new TokenManager({ apiKey: 'cwsk_same', coreUrl: 'http://core.test', storage, fetch, logger: quietLogger });
+
+  const a = await mk().getAccessToken('org1');   // cold: exchange + persist (with fp)
+  const b = await mk().getAccessToken('org1');   // fresh manager, same key + storage → reload from disk
+  assert.equal(a, 'AT1');
+  assert.equal(b, 'AT1', 'persisted token reused for the matching api_key');
+  assert.equal(exchanges, 1, 'no re-exchange when the api_key is unchanged');
+  // The persisted record carries a fingerprint (a hash, not the api_key).
+  const persisted = JSON.parse(await storage.get('tokens/org1.json'));
+  assert.ok(persisted.apiKeyFp, 'record stores an api_key fingerprint');
+  assert.notEqual(persisted.apiKeyFp, 'cwsk_same', 'fingerprint is not the raw api_key');
+});
+
+test('changed api_key (same org) is a cache miss → re-exchange as the new identity', async () => {
+  const storage = memoryStorage();
+  let exchanges = 0;
+  const fetch = fakeFetch((url, opts) => {
+    exchanges += 1;
+    // Surface which api_key minted this token so we can assert the identity swap.
+    const who = opts.headers.Authorization;
+    return { json: { data: { access_token: `AT-${who}`, access_token_expires_at: FUTURE, refresh_token: 'R' } } };
+  });
+
+  const first = new TokenManager({ apiKey: 'cwsk_bot2', coreUrl: 'http://core.test', storage, fetch, logger: quietLogger });
+  const t1 = await first.getAccessToken('org1');
+  assert.equal(t1, 'AT-Bearer cwsk_bot2');
+  assert.equal(exchanges, 1);
+
+  // Config swaps to a different api_key for the SAME org (identical storage/key).
+  const second = new TokenManager({ apiKey: 'cwsk_bot4', coreUrl: 'http://core.test', storage, fetch, logger: quietLogger });
+  const t2 = await second.getAccessToken('org1');
+  assert.equal(t2, 'AT-Bearer cwsk_bot4', 'stale JWT discarded; re-exchanged as the new identity');
+  assert.equal(exchanges, 2, 'api_key change forced a fresh exchange');
+  // Persisted record is now bound to the new api_key.
+  const persisted = JSON.parse(await storage.get('tokens/org1.json'));
+  assert.equal(persisted.access_token, 'AT-Bearer cwsk_bot4');
+});
+
+test('legacy persisted record with no fingerprint is treated as a miss → re-exchange', async () => {
+  const storage = memoryStorage();
+  // Simulate a record written by an older SDK version: valid, unexpired, but no apiKeyFp.
+  await storage.set('tokens/org1.json', JSON.stringify({
+    access_token: 'LEGACY_AT',
+    access_token_expires_at: Date.now() + 3600_000,
+    refresh_token: 'LEGACY_RT',
+  }));
+  let exchanges = 0;
+  const fetch = fakeFetch((url) => {
+    if (url.endsWith('/auth/refresh')) return { status: 500, json: { error: 'legacy refresh must not be used' } };
+    exchanges += 1;
+    return { json: { data: { access_token: 'FRESH_AT', access_token_expires_at: FUTURE, refresh_token: 'R' } } };
+  });
+  const tm = new TokenManager({ apiKey: 'cwsk_new', coreUrl: 'http://core.test', storage, fetch, logger: quietLogger });
+
+  const token = await tm.getAccessToken('org1');
+  assert.equal(token, 'FRESH_AT', 'legacy fp-less record ignored; fresh exchange performed');
+  assert.equal(exchanges, 1);
+  const persisted = JSON.parse(await storage.get('tokens/org1.json'));
+  assert.ok(persisted.apiKeyFp, 'record upgraded to carry a fingerprint');
+});
+
 // ── P1-C: a token request must not follow a redirect off the core origin ───────
 // Every token call carries a Bearer credential; native fetch would re-send it to
 // the redirect target. redirect:'manual' + a same-origin guard fails closed so
